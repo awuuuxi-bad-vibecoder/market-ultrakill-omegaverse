@@ -1,0 +1,6 @@
+{
+  "name": "Кассовый разнос",
+  "description": "2D top-down пиксельный файтинг в сеттинге ночного супермаркета с динамическим освещением и мобильным управлением.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
