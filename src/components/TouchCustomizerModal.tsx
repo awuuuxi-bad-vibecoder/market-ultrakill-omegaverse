@@ -17,13 +17,14 @@ interface TouchCustomizerModalProps {
 }
 
 const CONTROL_LABELS: Record<TouchControlId, { label: string; colorClass: string }> = {
-  stick: { label: 'СТИК', colorClass: 'bg-slate-800 text-amber-300 border-amber-400' },
-  attack: { label: 'УДАР', colorClass: 'bg-rose-500 text-white border-slate-950' },
-  dash: { label: 'РЫВОК', colorClass: 'bg-sky-400 text-slate-950 border-slate-950' },
-  parry: { label: 'ПАРИР', colorClass: 'bg-yellow-400 text-slate-950 border-slate-950' },
-  shotgun: { label: 'ДРОБЬ', colorClass: 'bg-orange-500 text-slate-950 border-slate-950' },
-  coin: { label: 'МОНЕТА', colorClass: 'bg-amber-300 text-slate-950 border-slate-950' },
-  rail: { label: 'ЛУЧ', colorClass: 'bg-cyan-300 text-slate-950 border-slate-950' },
+  stick: { label: 'STICK', colorClass: 'bg-slate-800 text-amber-300 border-amber-400' },
+  attack: { label: 'PUNCH', colorClass: 'bg-rose-500 text-white border-slate-950' },
+  dash: { label: 'DASH', colorClass: 'bg-sky-400 text-slate-950 border-slate-950' },
+  parry: { label: 'PARRY', colorClass: 'bg-yellow-400 text-slate-950 border-slate-950' },
+  shotgun: { label: 'SHOT', colorClass: 'bg-orange-500 text-slate-950 border-slate-950' },
+  coin: { label: 'COIN', colorClass: 'bg-amber-300 text-slate-950 border-slate-950' },
+  whiplash: { label: 'HOOK', colorClass: 'bg-emerald-400 text-slate-950 border-slate-950' },
+  rail: { label: 'BEAM', colorClass: 'bg-cyan-300 text-slate-950 border-slate-950' },
 };
 
 export const TouchCustomizerModal: React.FC<TouchCustomizerModalProps> = ({
@@ -84,6 +85,7 @@ export const TouchCustomizerModal: React.FC<TouchCustomizerModalProps> = ({
     'parry',
     'shotgun',
     'coin',
+    'whiplash',
     'rail',
   ];
 
@@ -92,17 +94,17 @@ export const TouchCustomizerModal: React.FC<TouchCustomizerModalProps> = ({
       className="fixed inset-0 z-40 bg-[#070a10]/88 flex flex-col justify-between p-3 sm:p-5 select-none touch-none"
       role="dialog"
       aria-modal="true"
-      aria-label="Настройка тач-управления"
+      aria-label="Touch Controls Customizer"
     >
       {/* Top Control Bar */}
       <div className="mx-auto w-full max-w-xl rounded-2xl bg-[#0f172a] border-2 border-amber-400/80 p-3 sm:p-4 shadow-[0_6px_0_#020617]">
         <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
           <div>
             <h2 className="font-pixel text-xs sm:text-sm text-amber-300">
-              НАСТРОЙКА КНОПОК
+              TOUCH CUSTOMIZER
             </h2>
             <p className="text-[11px] sm:text-xs text-slate-300 mt-0.5">
-              Перетащи любую кнопку или стик в удобное место!
+              Drag any button or stick anywhere you want!
             </p>
           </div>
           <div className="flex items-center gap-1.5">
@@ -112,7 +114,7 @@ export const TouchCustomizerModal: React.FC<TouchCustomizerModalProps> = ({
               className="min-h-[36px] px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-xs font-semibold flex items-center gap-1 cursor-pointer"
             >
               <RotateCcw className="w-3.5 h-3.5" />
-              <span>Сброс</span>
+              <span>Reset</span>
             </button>
             <button
               type="button"
@@ -120,14 +122,14 @@ export const TouchCustomizerModal: React.FC<TouchCustomizerModalProps> = ({
               className="min-h-[36px] px-3 rounded-lg bg-amber-400 hover:bg-amber-300 border-2 border-slate-950 text-slate-950 text-xs font-extrabold flex items-center gap-1 cursor-pointer"
             >
               <Check className="w-3.5 h-3.5" />
-              <span>Готово</span>
+              <span>Done</span>
             </button>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-2 flex-1 min-w-[190px] text-xs font-semibold text-slate-200">
-            <span className="whitespace-nowrap">Размер:</span>
+            <span className="whitespace-nowrap">Size:</span>
             <input
               type="range"
               min={85}
@@ -158,7 +160,7 @@ export const TouchCustomizerModal: React.FC<TouchCustomizerModalProps> = ({
             className="min-h-[36px] px-3 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-100 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
           >
             <Hand className="w-3.5 h-3.5 text-sky-400" />
-            <span>{isLeftHanded ? 'Режим: Левша' : 'Режим: Правша'}</span>
+            <span>{isLeftHanded ? 'Hand: Left' : 'Hand: Right'}</span>
           </button>
         </div>
       </div>
@@ -184,14 +186,14 @@ export const TouchCustomizerModal: React.FC<TouchCustomizerModalProps> = ({
             className="relative w-[114px] h-[114px] rounded-full border-2 border-dashed border-amber-400 bg-slate-900/90 flex items-center justify-center cursor-grab active:cursor-grabbing shadow-[0_4px_0_#020617]"
           >
             <div className="w-12 h-12 rounded-full bg-amber-400 border-2 border-slate-950 flex items-center justify-center">
-              <span className="text-[9px] font-extrabold text-slate-950">СТИК</span>
+              <span className="text-[9px] font-extrabold text-slate-950">STICK</span>
             </div>
           </div>
         </div>
 
-        {/* Draggable 6 Action Buttons */}
+        {/* Draggable 7 Action Buttons */}
         <div
-          className="relative w-[198px] h-[176px]"
+          className="relative w-[218px] h-[194px]"
           style={{
             transform: `scale(${effectiveScale})`,
             transformOrigin: isLeftHanded ? 'bottom left' : 'bottom right',

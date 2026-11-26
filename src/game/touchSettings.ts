@@ -5,7 +5,8 @@ export type TouchControlId =
   | 'parry'
   | 'shotgun'
   | 'coin'
-  | 'rail';
+  | 'rail'
+  | 'whiplash';
 
 export type TouchHandedness = 'right' | 'left';
 
@@ -20,7 +21,7 @@ export interface TouchLayoutConfig {
   offsets: Record<TouchControlId, TouchOffset>;
 }
 
-const TOUCH_LAYOUT_STORAGE_KEY = 'kassoviy_raznos_touch_layout_v2';
+const TOUCH_LAYOUT_STORAGE_KEY = 'kassoviy_raznos_touch_layout_v3';
 
 export function createDefaultTouchLayout(): TouchLayoutConfig {
   return {
@@ -34,6 +35,7 @@ export function createDefaultTouchLayout(): TouchLayoutConfig {
       shotgun: { dx: 0, dy: 0 },
       coin: { dx: 0, dy: 0 },
       rail: { dx: 0, dy: 0 },
+      whiplash: { dx: 0, dy: 0 },
     },
   };
 }

@@ -55,10 +55,37 @@ export function buildArenaBackground(zone: ArenaZoneConfig = ARENA_ZONES[0]): HT
   if (zone.id === 'frozen') {
     ctx.fillStyle = 'rgba(56, 189, 248, 0.14)';
     ctx.fillRect(156, 86, 456, 340);
+    if (zone.icePatches) {
+      for (const patch of zone.icePatches) {
+        ctx.fillStyle = 'rgba(186, 230, 253, 0.56)';
+        ctx.fillRect(patch.x, patch.y, patch.w, patch.h);
+        ctx.strokeStyle = 'rgba(224, 242, 254, 0.85)';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(patch.x + 1, patch.y + 1, patch.w - 2, patch.h - 2);
+        // Glossy diagonal ice sheen strips
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+        for (let sx = patch.x + 10; sx < patch.x + patch.w - 18; sx += 26) {
+          ctx.fillRect(sx, patch.y + 8, 12, 3);
+          ctx.fillRect(sx + 6, patch.y + 13, 8, 2);
+          ctx.fillRect(sx + 2, patch.y + patch.h - 14, 10, 3);
+        }
+      }
+    }
   } else if (zone.id === 'warehouse') {
     ctx.fillStyle = 'rgba(245, 158, 11, 0.14)';
     for (let x = 80; x < ARENA_WIDTH - 80; x += 28) {
       ctx.fillRect(x, 252, 14, 6);
+    }
+    if (zone.conveyors) {
+      for (const belt of zone.conveyors) {
+        ctx.fillStyle = '#1e293b';
+        ctx.fillRect(belt.x - 2, belt.y - 2, belt.w + 4, belt.h + 4);
+        ctx.fillStyle = '#334155';
+        ctx.fillRect(belt.x, belt.y, belt.w, belt.h);
+        ctx.fillStyle = '#f59e0b';
+        ctx.fillRect(belt.x, belt.y, belt.w, 2);
+        ctx.fillRect(belt.x, belt.y + belt.h - 2, belt.w, 2);
+      }
     }
   }
 
@@ -307,6 +334,7 @@ export interface SpriteAtlas {
   player: CharacterSpriteSet;
   enemies: Record<string, CharacterSpriteSet>;
   cart: HTMLCanvasElement;
+  canister: CharacterSpriteSet;
   items: Record<PickupKind, HTMLCanvasElement>;
 }
 
@@ -383,6 +411,56 @@ function buildPickupSprites(): Record<PickupKind, HTMLCanvasElement> {
       ctx.fillStyle = '#fef3c7';
       ctx.fillRect(6, 5, 4, 2);
     }),
+    buff_frenzy: makeItem((ctx) => {
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(3, 1, 10, 14);
+      ctx.fillStyle = '#22d3ee';
+      ctx.fillRect(4, 2, 8, 12);
+      ctx.fillStyle = '#fef08a';
+      ctx.fillRect(7, 3, 3, 4);
+      ctx.fillRect(6, 7, 3, 5);
+    }),
+    buff_chili: makeItem((ctx) => {
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(3, 3, 10, 11);
+      ctx.fillStyle = '#ef4444';
+      ctx.fillRect(4, 5, 8, 7);
+      ctx.fillStyle = '#fb923c';
+      ctx.fillRect(6, 8, 5, 4);
+      ctx.fillStyle = '#22c55e';
+      ctx.fillRect(6, 2, 4, 3);
+    }),
+    buff_coin: makeItem((ctx) => {
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(2, 2, 12, 12);
+      ctx.fillStyle = '#facc15';
+      ctx.fillRect(3, 3, 10, 10);
+      ctx.fillStyle = '#fef08a';
+      ctx.fillRect(5, 4, 6, 3);
+      ctx.fillStyle = '#ca8a04';
+      ctx.fillRect(7, 5, 2, 6);
+    }),
+  };
+}
+
+function buildCanisterSprite(): CharacterSpriteSet {
+  const c = makeCanvas(18, 20);
+  const ctx = getPixelCtx(c);
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(3, 2, 12, 16);
+  ctx.fillStyle = '#dc2626';
+  ctx.fillRect(4, 4, 10, 13);
+  ctx.fillStyle = '#ef4444';
+  ctx.fillRect(5, 5, 4, 10);
+  ctx.fillStyle = '#e2e8f0';
+  ctx.fillRect(6, 1, 6, 3);
+  ctx.fillStyle = '#facc15';
+  ctx.fillRect(4, 9, 10, 3);
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(7, 10, 4, 1);
+  return {
+    normal: c,
+    flash: makeFlashCopy(c),
   };
 }
 
@@ -440,6 +518,7 @@ export function createSpriteAtlas(
     player,
     enemies,
     cart: buildCartSprite(),
+    canister: buildCanisterSprite(),
     items: buildPickupSprites(),
   };
 }

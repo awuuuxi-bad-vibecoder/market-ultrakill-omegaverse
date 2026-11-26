@@ -11,9 +11,9 @@ import { HudSnapshot, TouchMode } from './game/types';
 const INITIAL_HUD: HudSnapshot = {
   phase: 'title',
   round: 1,
-  roundTitle: 'Разгром в бакалее',
+  roundTitle: 'Checkout Brawl',
   zoneId: 'grocery',
-  zoneName: 'Бакалея 24/7',
+  zoneName: '24/7 Grocery',
   isEmergencyLight: false,
   hp: 100,
   maxHp: 100,
@@ -25,6 +25,9 @@ const INITIAL_HUD: HudSnapshot = {
   railCharge: 100,
   shotgunCooldownRatio: 0,
   parryCooldownRatio: 0,
+  whiplashCooldownRatio: 0,
+  frenzySeconds: 0,
+  chiliSeconds: 0,
   heldItem: null,
   score: 0,
   bestScore: 0,
@@ -47,6 +50,8 @@ const INITIAL_HUD: HudSnapshot = {
   announcement: null,
   muted: false,
   isFullscreen: false,
+  leaderboard: [],
+  isNewRecord: false,
 };
 
 function detectTouchViewport(): boolean {
@@ -118,13 +123,14 @@ export default function App() {
       <canvas
         ref={canvasRef}
         data-testid="game-canvas"
-        aria-label="Игровое поле супермаркета"
+        aria-label="Supermarket battleground arena"
         className="w-full h-full block pixelated"
       />
 
       {hud.phase === 'title' && !customizingTouch && (
         <TitleOverlay
           bestScore={hud.bestScore}
+          leaderboard={hud.leaderboard}
           muted={hud.muted}
           touchMode={touchMode}
           isFullscreen={hud.isFullscreen}
@@ -153,6 +159,7 @@ export default function App() {
           railCharge={hud.railCharge}
           shotgunCooldownRatio={hud.shotgunCooldownRatio}
           parryCooldownRatio={hud.parryCooldownRatio}
+          whiplashCooldownRatio={hud.whiplashCooldownRatio}
           layout={touchLayout}
           onMove={(x, y) => engineRef.current?.setTouchMove(x, y)}
           onAttack={() => engineRef.current?.triggerAttack()}
@@ -161,6 +168,7 @@ export default function App() {
           onShotgun={() => engineRef.current?.triggerShotgun()}
           onCoin={() => engineRef.current?.triggerCoin()}
           onRailcannon={() => engineRef.current?.triggerRailcannon()}
+          onWhiplash={() => engineRef.current?.triggerWhiplash()}
         />
       )}
 

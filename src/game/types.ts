@@ -24,14 +24,20 @@ export type EnemyMoveKind =
   | 'slam'
   | 'laser'
   | 'tornado'
-  | 'dash_flank';
+  | 'dash_flank'
+  | 'ice_spikes'
+  | 'forklift_ram'
+  | 'vip_lasers';
 
 export type PickupKind =
   | 'watermelon'
   | 'baguette'
   | 'soda_bomb'
   | 'energy_drink'
-  | 'croissant';
+  | 'croissant'
+  | 'buff_frenzy'
+  | 'buff_chili'
+  | 'buff_coin';
 
 export type StyleRank = 'D' | 'C' | 'B' | 'A' | 'S' | 'SS' | 'SSS' | 'ULTRA';
 
@@ -45,6 +51,54 @@ export interface Rect {
   y: number;
   w: number;
   h: number;
+}
+
+export interface ConveyorBelt extends Rect {
+  id: string;
+  vx: number;
+  vy: number;
+}
+
+export interface ExplosiveCanister {
+  id: string;
+  x: number;
+  y: number;
+  radius: number;
+  hp: number;
+  maxHp: number;
+  destroyed: boolean;
+  respawnTimer: number;
+  hitFlashTimer: number;
+}
+
+export interface FloorHazard {
+  active: boolean;
+  kind: 'ice_spike' | 'vip_laser' | 'chili_fire';
+  x: number;
+  y: number;
+  x2: number;
+  y2: number;
+  radius: number;
+  windupTimer: number;
+  maxWindup: number;
+  activeTimer: number;
+  damage: number;
+  fromPlayer: boolean;
+  hitTarget: boolean;
+  tickAccum: number;
+}
+
+export interface WhiplashState {
+  active: boolean;
+  phase: 'extend' | 'pull_player' | 'pull_enemy' | 'retract';
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  targetEnemyId: string | null;
+  targetCanisterId: string | null;
+  targetPickupId: string | null;
+  timer: number;
 }
 
 export type ShelfStyle =
@@ -74,6 +128,8 @@ export interface ArenaZoneConfig {
   emergencyRgb: [number, number, number];
   shelves: ShelfObstacle[];
   lights: LightSource[];
+  icePatches?: Rect[];
+  conveyors?: ConveyorBelt[];
 }
 
 export interface ShelfObstacle extends Rect {
@@ -148,6 +204,10 @@ export interface PlayerState {
   parryTimer: number;
   parryCooldown: number;
   parryHitDone: boolean;
+  whiplashCooldown: number;
+  frenzyTimer: number;
+  chiliTimer: number;
+  chiliTrailAccum: number;
   comboStep: number;
   comboResetTimer: number;
   attackTimer: number;
@@ -316,6 +376,18 @@ export interface UpgradeOption {
   iconKind: 'fist' | 'bolt' | 'croissant' | 'crit' | 'cart' | 'fridge';
 }
 
+export interface RunRecord {
+  id: string;
+  score: number;
+  round: number;
+  styleRank: StyleRank;
+  zoneName: string;
+  kos: number;
+  parries: number;
+  elapsedSeconds: number;
+  timestamp: number;
+}
+
 export interface HudSnapshot {
   phase: GamePhase;
   round: number;
@@ -333,6 +405,9 @@ export interface HudSnapshot {
   railCharge: number;
   shotgunCooldownRatio: number;
   parryCooldownRatio: number;
+  whiplashCooldownRatio: number;
+  frenzySeconds: number;
+  chiliSeconds: number;
   heldItem: PickupKind | null;
   score: number;
   bestScore: number;
@@ -355,6 +430,8 @@ export interface HudSnapshot {
   announcement: string | null;
   muted: boolean;
   isFullscreen: boolean;
+  leaderboard: RunRecord[];
+  isNewRecord: boolean;
 }
 
 export interface RoundEnemySpec {

@@ -429,6 +429,77 @@ class SoundEngine {
     osc.stop(now + 0.14);
   }
 
+  public playWhiplash(): void {
+    if (!this.canPlay('whiplash', 80)) return;
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(680, now);
+    osc.frequency.exponentialRampToValueAtTime(1420, now + 0.08);
+    osc.frequency.exponentialRampToValueAtTime(340, now + 0.16);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.13, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.17);
+    osc.connect(g);
+    g.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.18);
+  }
+
+  public playExplosion(): void {
+    if (!this.canPlay('explosion', 70)) return;
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.noiseBuffer(ctx, 0.28);
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(1500, now);
+    filter.frequency.exponentialRampToValueAtTime(120, now + 0.28);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.28, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+    noise.connect(filter);
+    filter.connect(g);
+    g.connect(ctx.destination);
+    noise.start(now);
+    noise.stop(now + 0.29);
+
+    const sub = ctx.createOscillator();
+    sub.type = 'triangle';
+    sub.frequency.setValueAtTime(135, now);
+    sub.frequency.exponentialRampToValueAtTime(34, now + 0.24);
+    const sg = ctx.createGain();
+    sg.gain.setValueAtTime(0.26, now);
+    sg.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+    sub.connect(sg);
+    sg.connect(ctx.destination);
+    sub.start(now);
+    sub.stop(now + 0.26);
+  }
+
+  public playIceSpike(): void {
+    if (!this.canPlay('ice', 90)) return;
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(1320, now);
+    osc.frequency.exponentialRampToValueAtTime(480, now + 0.14);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.14, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+    osc.connect(g);
+    g.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.16);
+  }
+
   public playGameOver(): void {
     const ctx = this.ensureContext();
     if (!ctx) return;

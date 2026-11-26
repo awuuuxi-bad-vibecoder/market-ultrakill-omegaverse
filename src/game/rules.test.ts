@@ -6,24 +6,30 @@ import {
   computeCoinRicochetChain,
   computePlayerHit,
   computeStyleRank,
+  computeWhiplashMode,
   createDestructibleShelves,
+  damageCanister,
   damageShelf,
   generateRoundEncounter,
+  getConveyorPushAt,
   getZoneForRound,
   isInStrikeCone,
+  isPointOnIce,
   pointToSegmentDist,
   predictLeadAngle,
   resolveCircleRect,
+  sortRunLeaderboard,
+  tickCanisterRespawn,
   tickShelfRespawn,
 } from './rules';
-import { ARENA_SHELVES } from './constants';
+import { ARENA_SHELVES, createArenaCanisters } from './constants';
 import {
   clampTouchOffset,
   clampTouchScale,
   computeEffectiveTouchScale,
   createDefaultTouchLayout,
 } from './touchSettings';
-import { PlayerState } from './types';
+import { PlayerState, RunRecord } from './types';
 
 function makePlayer(): PlayerState {
   return {
@@ -51,6 +57,10 @@ function makePlayer(): PlayerState {
     parryTimer: 0,
     parryCooldown: 0,
     parryHitDone: false,
+    whiplashCooldown: 0,
+    frenzyTimer: 0,
+    chiliTimer: 0,
+    chiliTrailAccum: 0,
     comboStep: 0,
     comboResetTimer: 0,
     attackTimer: 0,
@@ -71,8 +81,8 @@ function makePlayer(): PlayerState {
   };
 }
 
-test('generateRoundEncounter ALWAYS spawns strictly 1v1 duels with zone changes every 5 rounds', () => {
-  for (const r of [1, 3, 5, 6, 10, 11, 16]) {
+test('generateRoundEncounter ALWAYS spawns strictly 1v1 duels with zone bosses every 5 rounds', () => {
+  for (const r of [1, 3, 5, 6, 10, 11, 15, 16, 20]) {
     const plan = generateRoundEncounter(r, r * 42);
     assert.equal(plan.enemies.length, 1);
   }
@@ -81,12 +91,80 @@ test('generateRoundEncounter ALWAYS spawns strictly 1v1 duels with zone changes 
   assert.equal(getZoneForRound(6).id, 'frozen');
   assert.equal(getZoneForRound(10).id, 'frozen');
   assert.equal(getZoneForRound(11).id, 'warehouse');
+  assert.equal(getZoneForRound(15).id, 'warehouse');
   assert.equal(getZoneForRound(16).id, 'vip_night');
+  assert.equal(getZoneForRound(20).id, 'vip_night');
   assert.equal(getZoneForRound(21).id, 'grocery');
 
   const r5 = generateRoundEncounter(5, 10);
+  const r10 = generateRoundEncounter(10, 10);
+  const r15 = generateRoundEncounter(15, 10);
+  const r20 = generateRoundEncounter(20, 10);
   assert.equal(r5.enemies[0].isBoss, true);
+  assert.equal(r10.enemies[0].archetype, 'heavy');
+  assert.equal(r15.enemies[0].archetype, 'charger');
+  assert.equal(r20.enemies[0].archetype, 'flanker');
   assert.ok(r5.enemies[0].hp >= 1000);
+});
+
+test('interactive department hazards: frozen ice patches and warehouse conveyor belts', () => {
+  const grocery = getZoneForRound(1);
+  const frozen = getZoneForRound(6);
+  const warehouse = getZoneForRound(11);
+
+  assert.equal(isPointOnIce(384, 256, grocery), false);
+  const firstIce = frozen.icePatches?.[0];
+  assert.ok(firstIce);
+  assert.equal(isPointOnIce(firstIce.x + firstIce.w / 2, firstIce.y + firstIce.h / 2, frozen), true);
+
+  assert.deepEqual(getConveyorPushAt(384, 256, grocery), { vx: 0, vy: 0 });
+  const firstBelt = warehouse.conveyors?.[0];
+  assert.ok(firstBelt);
+  const push = getConveyorPushAt(firstBelt.x + firstBelt.w / 2, firstBelt.y + firstBelt.h / 2, warehouse);
+  assert.ok(Math.hypot(push.vx, push.vy) > 0);
+});
+
+test('corner canisters detonate on hit and respawn after cooldown', () => {
+  const canisters = createArenaCanisters();
+  assert.equal(canisters.length, 8);
+  const target = canisters[0];
+  assert.equal(target.destroyed, false);
+
+  const exploded = damageCanister(target, 20);
+  assert.equal(exploded, true);
+  assert.equal(target.destroyed, true);
+  assert.ok(target.respawnTimer > 0);
+
+  let respawned = false;
+  for (let i = 0; i < 150; i++) {
+    if (tickCanisterRespawn(target, 0.1)) {
+      respawned = true;
+    }
+  }
+  assert.equal(respawned, true);
+  assert.equal(target.destroyed, false);
+  assert.equal(target.hp, target.maxHp);
+});
+
+test('computeWhiplashMode yanks light enemies and grapples player to heavy/boss foes', () => {
+  assert.equal(computeWhiplashMode({ archetype: 'brawler', isBoss: false }), 'pull_enemy');
+  assert.equal(computeWhiplashMode({ archetype: 'flanker', isBoss: false }), 'pull_enemy');
+  assert.equal(computeWhiplashMode({ archetype: 'thrower', isBoss: false }), 'pull_enemy');
+  assert.equal(computeWhiplashMode({ archetype: 'heavy', isBoss: false }), 'pull_player');
+  assert.equal(computeWhiplashMode({ archetype: 'charger', isBoss: false }), 'pull_player');
+  assert.equal(computeWhiplashMode({ archetype: 'brawler', isBoss: true }), 'pull_player');
+});
+
+test('sortRunLeaderboard ranks highest scores first and caps entries', () => {
+  const runs: RunRecord[] = [
+    { id: '1', score: 1200, round: 3, styleRank: 'B', zoneName: '24/7 Grocery', kos: 2, parries: 1, elapsedSeconds: 50, timestamp: 10 },
+    { id: '2', score: 4800, round: 10, styleRank: 'ULTRA', zoneName: 'Frozen Aisle', kos: 9, parries: 7, elapsedSeconds: 210, timestamp: 20 },
+    { id: '3', score: 2500, round: 6, styleRank: 'S', zoneName: 'Frozen Aisle', kos: 5, parries: 3, elapsedSeconds: 110, timestamp: 30 },
+  ];
+  const sorted = sortRunLeaderboard(runs, 2);
+  assert.equal(sorted.length, 2);
+  assert.equal(sorted[0].id, '2');
+  assert.equal(sorted[1].id, '3');
 });
 
 test('destructible shelves break on damage and automatically regenerate after cooldown', () => {
@@ -161,4 +239,3 @@ test('resolveCircleRect, circleIntersect, strike cone, and upgrades remain valid
   applyUpgradeToPlayer(p, 'turbo_sneakers');
   assert.equal(p.maxStamina, 400);
 });
-

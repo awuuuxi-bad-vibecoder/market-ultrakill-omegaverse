@@ -2,6 +2,7 @@ import {
   ARENA_HEIGHT,
   ARENA_WIDTH,
   ARENA_ZONES,
+  createArenaCanisters,
   ENEMY_PALETTES,
   PICKUP_SPAWN_POINTS,
   PLAYER_SPAWN,
@@ -17,16 +18,22 @@ import {
   computeCoinRicochetChain,
   computePlayerHit,
   computeStyleRank,
+  computeWhiplashMode,
   createDestructibleShelves,
+  damageCanister,
   damageShelf,
   generateRoundEncounter,
+  getConveyorPushAt,
   getZoneForRound,
   isInStrikeCone,
+  isPointOnIce,
   lerp,
   pickUpgradeChoices,
   pointToSegmentDist,
   predictLeadAngle,
   resolveCircleRect,
+  sortRunLeaderboard,
+  tickCanisterRespawn,
   tickShelfRespawn,
 } from './rules';
 import { buildArenaBackground, buildShelfSpriteMap, createSpriteAtlas, SpriteAtlas } from './sprites';
@@ -37,7 +44,9 @@ import {
   DestructibleShelf,
   EnemyMoveKind,
   EnemyState,
+  ExplosiveCanister,
   FloatingText,
+  FloorHazard,
   GamePhase,
   HudSnapshot,
   LaserBeam,
@@ -47,13 +56,27 @@ import {
   PlayerState,
   Projectile,
   RoundPlan,
+  RunRecord,
   ShockwaveRing,
   ShoppingCart,
   StyleRank,
   UpgradeOption,
+  WhiplashState,
 } from './types';
 
-const BEST_SCORE_KEY = 'kassovy_raznos_best_score_v3';
+const BEST_SCORE_KEY = 'checkout_carnage_best_score_v4';
+const LEADERBOARD_KEY = 'checkout_carnage_leaderboard_v1';
+
+const RANK_ORDER: Record<StyleRank, number> = {
+  D: 0,
+  C: 1,
+  B: 2,
+  A: 3,
+  S: 4,
+  SS: 5,
+  SSS: 6,
+  ULTRA: 7,
+};
 
 export class SupermarketBrawlerEngine {
   private displayCanvas: HTMLCanvasElement;
@@ -90,11 +113,14 @@ export class SupermarketBrawlerEngine {
 
   private score = 0;
   private bestScore = 0;
+  private leaderboard: RunRecord[] = [];
+  private isNewRecord = false;
   private comboCount = 0;
   private maxCombo = 0;
   private comboTimeout = 0;
   private stylePoints = 0;
   private styleRank: StyleRank = 'D';
+  private peakStyleRank: StyleRank = 'D';
   private styleFeed: string[] = [];
   private styleFeedTimer = 0;
 
@@ -104,6 +130,8 @@ export class SupermarketBrawlerEngine {
   private upgradeChoices: UpgradeOption[] = [];
 
   private shelves: DestructibleShelf[] = [];
+  private canisters: ExplosiveCanister[] = [];
+  private pendingChainCanisters: { id: string; timer: number }[] = [];
   private player!: PlayerState;
   private enemies: EnemyState[] = [];
   private carts: ShoppingCart[] = [];
@@ -111,6 +139,20 @@ export class SupermarketBrawlerEngine {
   private pickupSpawnTimer = 4.0;
   private entitySeq = 0;
 
+  private whiplash: WhiplashState = {
+    active: false,
+    phase: 'extend',
+    x: 0,
+    y: 0,
+    vx: 0,
+    vy: 0,
+    targetEnemyId: null,
+    targetCanisterId: null,
+    targetPickupId: null,
+    timer: 0,
+  };
+
+  private hazards: FloorHazard[] = [];
   private particles: Particle[] = [];
   private particleCursor = 0;
   private projectiles: Projectile[] = [];
@@ -143,6 +185,7 @@ export class SupermarketBrawlerEngine {
   private shotgunQueued = false;
   private coinQueued = false;
   private railQueued = false;
+  private whiplashQueued = false;
 
   private onHudSync: (snapshot: HudSnapshot) => void;
   private hudSyncAccum = 0;
@@ -172,11 +215,11 @@ export class SupermarketBrawlerEngine {
 
     this.currentZone = ARENA_ZONES[0];
     this.shelves = createDestructibleShelves(this.currentZone.shelves);
+    this.canisters = createArenaCanisters();
     this.atlas = createSpriteAtlas(this.shelves, this.currentZone);
     this.lighting = new LightingSystem();
     this.lighting.setZone(this.currentZone);
 
-    // Pre-bake low-HP red vignette once for zero per-frame gradient allocations!
     this.lowHpVignetteCanvas = document.createElement('canvas');
     this.lowHpVignetteCanvas.width = 128;
     this.lowHpVignetteCanvas.height = 128;
@@ -187,12 +230,7 @@ export class SupermarketBrawlerEngine {
     vctx.fillStyle = vgrad;
     vctx.fillRect(0, 0, 128, 128);
 
-    try {
-      const saved = localStorage.getItem(BEST_SCORE_KEY);
-      if (saved) this.bestScore = parseInt(saved, 10) || 0;
-    } catch {
-      // Ignore storage errors
-    }
+    this.loadPersistentRecords();
 
     this.allocatePools();
     this.currentPlan = generateRoundEncounter(1, 17);
@@ -203,8 +241,27 @@ export class SupermarketBrawlerEngine {
     this.syncHud(true);
   }
 
+  private loadPersistentRecords(): void {
+    try {
+      const saved = localStorage.getItem(BEST_SCORE_KEY);
+      if (saved) this.bestScore = parseInt(saved, 10) || 0;
+      const rawBoard = localStorage.getItem(LEADERBOARD_KEY);
+      if (rawBoard) {
+        const parsed = JSON.parse(rawBoard);
+        if (Array.isArray(parsed)) {
+          this.leaderboard = sortRunLeaderboard(parsed);
+          if (this.leaderboard[0] && this.leaderboard[0].score > this.bestScore) {
+            this.bestScore = this.leaderboard[0].score;
+          }
+        }
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
   private allocatePools(): void {
-    this.particles = Array.from({ length: 220 }, () => ({
+    this.particles = Array.from({ length: 240 }, () => ({
       active: false,
       x: 0,
       y: 0,
@@ -251,7 +308,7 @@ export class SupermarketBrawlerEngine {
       spin: 0,
     }));
 
-    this.shockwaves = Array.from({ length: 12 }, () => ({
+    this.shockwaves = Array.from({ length: 16 }, () => ({
       active: false,
       x: 0,
       y: 0,
@@ -264,7 +321,7 @@ export class SupermarketBrawlerEngine {
       hitTarget: false,
     }));
 
-    this.lasers = Array.from({ length: 14 }, () => ({
+    this.lasers = Array.from({ length: 18 }, () => ({
       active: false,
       x1: 0,
       y1: 0,
@@ -276,7 +333,24 @@ export class SupermarketBrawlerEngine {
       maxTtl: 0.22,
     }));
 
-    this.afterimages = Array.from({ length: 18 }, () => ({
+    this.hazards = Array.from({ length: 36 }, () => ({
+      active: false,
+      kind: 'ice_spike',
+      x: 0,
+      y: 0,
+      x2: 0,
+      y2: 0,
+      radius: 26,
+      windupTimer: 0,
+      maxWindup: 0.55,
+      activeTimer: 0,
+      damage: 14,
+      fromPlayer: false,
+      hitTarget: false,
+      tickAccum: 0,
+    }));
+
+    this.afterimages = Array.from({ length: 20 }, () => ({
       active: false,
       x: 0,
       y: 0,
@@ -354,7 +428,7 @@ export class SupermarketBrawlerEngine {
         await document.exitFullscreen?.();
       }
     } catch {
-      // Fullscreen or orientation lock might be restricted by iframe/OS; fail silently
+      // Ignore fullscreen denial
     }
     this.syncHud(true);
   }
@@ -364,20 +438,16 @@ export class SupermarketBrawlerEngine {
     if (rect.width <= 0 || rect.height <= 0) return;
     this.viewportW = rect.width;
     this.viewportH = rect.height;
-    // Cap DPR at 1.5 for crisp pixel-art and blazing 60fps performance on budget phones
     this.dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     this.displayCanvas.width = Math.round(rect.width * this.dpr);
     this.displayCanvas.height = Math.round(rect.height * this.dpr);
 
     const minDim = Math.min(rect.width, rect.height);
     if (rect.width < 680) {
-      // Portrait phone
       this.camZoom = clamp(rect.width / 255, 1.38, 2.05);
     } else if (rect.height < 520) {
-      // Horizontal/Landscape phone!
       this.camZoom = clamp(rect.height / 285, 1.15, 1.85);
     } else {
-      // Desktop / Tablet
       this.camZoom = clamp(minDim / 430, 1.25, 2.25);
     }
   };
@@ -423,6 +493,9 @@ export class SupermarketBrawlerEngine {
 
     if (e.button === 0) {
       this.attackQueued = true;
+    } else if (e.button === 1) {
+      e.preventDefault();
+      this.whiplashQueued = true;
     } else if (e.button === 2) {
       this.parryQueued = true;
     }
@@ -491,6 +564,8 @@ export class SupermarketBrawlerEngine {
       this.coinQueued = true;
     } else if (code === 'KeyC') {
       this.railQueued = true;
+    } else if (code === 'KeyG' || code === 'KeyV') {
+      this.whiplashQueued = true;
     }
   };
 
@@ -533,6 +608,11 @@ export class SupermarketBrawlerEngine {
   public triggerRailcannon(): void {
     soundEngine.unlock();
     if (this.phase === 'playing') this.railQueued = true;
+  }
+
+  public triggerWhiplash(): void {
+    soundEngine.unlock();
+    if (this.phase === 'playing') this.whiplashQueued = true;
   }
 
   public start(): void {
@@ -599,11 +679,13 @@ export class SupermarketBrawlerEngine {
   private resetRunState(clearDecals: boolean): void {
     this.round = 1;
     this.score = 0;
+    this.isNewRecord = false;
     this.comboCount = 0;
     this.maxCombo = 0;
     this.comboTimeout = 0;
     this.stylePoints = 0;
     this.styleRank = 'D';
+    this.peakStyleRank = 'D';
     this.styleFeed = [];
     this.styleFeedTimer = 0;
     this.kosTotal = 0;
@@ -620,6 +702,8 @@ export class SupermarketBrawlerEngine {
     this.announcementTimer = 0;
     this.announcementText = null;
     this.upgradeChoices = [];
+    this.pendingChainCanisters = [];
+    this.whiplash.active = false;
     this.clearHeldInputs();
     this.attackQueued = false;
     this.dashQueued = false;
@@ -627,9 +711,11 @@ export class SupermarketBrawlerEngine {
     this.shotgunQueued = false;
     this.coinQueued = false;
     this.railQueued = false;
+    this.whiplashQueued = false;
 
     this.applyZoneForRound(1, true);
     this.shelves = createDestructibleShelves(this.currentZone.shelves);
+    this.canisters = createArenaCanisters();
 
     this.player = {
       x: PLAYER_SPAWN.x,
@@ -656,6 +742,10 @@ export class SupermarketBrawlerEngine {
       parryTimer: 0,
       parryCooldown: 0,
       parryHitDone: false,
+      whiplashCooldown: 0,
+      frenzyTimer: 0,
+      chiliTimer: 0,
+      chiliTrailAccum: 0,
       comboStep: 0,
       comboResetTimer: 0,
       attackTimer: 0,
@@ -677,10 +767,11 @@ export class SupermarketBrawlerEngine {
 
     this.enemies = [];
     this.pickups = [];
-    for (const p of this.projectiles) p.active = false;
+    for (const pr of this.projectiles) pr.active = false;
     for (const c of this.coins) c.active = false;
     for (const sw of this.shockwaves) sw.active = false;
     for (const lb of this.lasers) lb.active = false;
+    for (const hz of this.hazards) hz.active = false;
     for (const af of this.afterimages) af.active = false;
     for (const pt of this.particles) pt.active = false;
     for (const ft of this.floatingTexts) ft.active = false;
@@ -702,13 +793,13 @@ export class SupermarketBrawlerEngine {
     this.currentPlan = generateRoundEncounter(1, 22);
     this.enemies = [
       this.makeEnemyFromSpec(
-        { archetype: 'flanker', name: 'Дуэлянт', isBoss: false, hp: 320, speed: 105, damage: 10, radius: 11, paletteIndex: 2 },
+        { archetype: 'flanker', name: 'Challenger', isBoss: false, hp: 320, speed: 105, damage: 10, radius: 11, paletteIndex: 2 },
         520,
         245
       ),
     ];
     this.spawnPickupAt('watermelon', 340, 200);
-    this.spawnPickupAt('energy_drink', 428, 308);
+    this.spawnPickupAt('buff_frenzy', 428, 308);
   }
 
   private applyZoneForRound(roundNum: number, silent = false): boolean {
@@ -734,18 +825,21 @@ export class SupermarketBrawlerEngine {
     this.enemies = [];
     this.pendingNextPhase = null;
     this.pendingTransitionTimer = 0;
+    this.pendingChainCanisters = [];
+    this.whiplash.active = false;
     this.timeScale = 1;
     for (const pr of this.projectiles) pr.active = false;
     for (const c of this.coins) c.active = false;
     for (const sw of this.shockwaves) sw.active = false;
     for (const lb of this.lasers) lb.active = false;
+    for (const hz of this.hazards) hz.active = false;
     for (const af of this.afterimages) af.active = false;
 
-    // Restore current zone's shelves cleanly on round start
     this.shelves = createDestructibleShelves(this.currentZone.shelves);
+    this.canisters = createArenaCanisters();
     this.resolveActorCollisions(this.player);
 
-    this.player.coins = this.player.maxCoins;
+    this.player.coins = Math.max(this.player.coins, this.player.maxCoins);
     this.player.stamina = this.player.maxStamina;
     this.player.railCharge = 100;
 
@@ -774,10 +868,16 @@ export class SupermarketBrawlerEngine {
     this.spawnRandomPickup();
     this.pickupSpawnTimer = 5.5;
 
-    this.announcementText = zoneChanged
-      ? `НОВАЯ ЛОКАЦИЯ: ${this.currentZone.name.toUpperCase()}! · ${spec.name.toUpperCase()}`
-      : `РАУНД ${roundNum} · 1 НА 1 · ${spec.name.toUpperCase()}`;
-    this.announcementTimer = zoneChanged ? 2.6 : 2.0;
+    if (roundNum % 5 === 0) {
+      this.announcementText = `BOSS EVENT: ${this.currentZone.name.toUpperCase()} · ${spec.name.toUpperCase()}`;
+      this.announcementTimer = 2.8;
+    } else if (zoneChanged) {
+      this.announcementText = `NEW SECTION: ${this.currentZone.name.toUpperCase()}! · ${spec.name.toUpperCase()}`;
+      this.announcementTimer = 2.6;
+    } else {
+      this.announcementText = `ROUND ${roundNum} · 1v1 DUEL · ${spec.name.toUpperCase()}`;
+      this.announcementTimer = 2.0;
+    }
     soundEngine.playRoundBell();
     this.syncHud(true);
   }
@@ -828,6 +928,9 @@ export class SupermarketBrawlerEngine {
   private addStyle(points: number, tag?: string): void {
     this.stylePoints = clamp(this.stylePoints + points, 0, 1200);
     this.styleRank = computeStyleRank(this.stylePoints);
+    if (RANK_ORDER[this.styleRank] > RANK_ORDER[this.peakStyleRank]) {
+      this.peakStyleRank = this.styleRank;
+    }
     if (tag) {
       this.styleFeed.unshift(tag);
       if (this.styleFeed.length > 4) this.styleFeed.pop();
@@ -893,7 +996,7 @@ export class SupermarketBrawlerEngine {
           this.upgradeChoices = pickUpgradeChoices(this.round * 97 + this.score);
           this.setPhase('upgrade');
         } else if (target === 'gameover') {
-          this.saveBestScore();
+          this.recordRunOnGameOver();
           soundEngine.playGameOver();
           this.setPhase('gameover');
         }
@@ -909,9 +1012,12 @@ export class SupermarketBrawlerEngine {
     }
 
     this.updateShelves(simDt);
+    this.updateCanisters(simDt);
     this.updatePlayer(simDt);
+    this.updateWhiplash(simDt);
     this.updateCoins(simDt);
     this.updateEnemies(simDt);
+    this.updateHazards(simDt);
     this.updateShockwaves(simDt);
     this.updateCarts(simDt);
     this.updatePickups(simDt);
@@ -972,10 +1078,93 @@ export class SupermarketBrawlerEngine {
         const cy = s.y + s.h / 2;
         this.spawnBurst(cx, cy, '#38bdf8', 14, true);
         this.lighting.spawnFlash(cx, cy, '#38bdf8', 95, 0.7, 0.2);
-        // Push actors out if standing inside newly restocked shelf
         this.resolveActorCollisions(this.player);
         for (const e of this.enemies) this.resolveActorCollisions(e);
         for (const c of this.carts) this.resolveActorCollisions(c);
+      }
+    }
+  }
+
+  private updateCanisters(dt: number): void {
+    for (const can of this.canisters) {
+      const respawned = tickCanisterRespawn(can, dt);
+      if (respawned) {
+        this.spawnBurst(can.x, can.y, '#ef4444', 10, true);
+      }
+    }
+
+    for (let i = this.pendingChainCanisters.length - 1; i >= 0; i--) {
+      const item = this.pendingChainCanisters[i];
+      item.timer -= dt;
+      if (item.timer <= 0) {
+        this.pendingChainCanisters.splice(i, 1);
+        const target = this.canisters.find((c) => c.id === item.id);
+        if (target && !target.destroyed) {
+          this.detonateCanister(target, true);
+        }
+      }
+    }
+  }
+
+  private damageCanistersInRadius(x: number, y: number, radius: number, dmg: number): void {
+    for (const can of this.canisters) {
+      if (can.destroyed) continue;
+      if (circleIntersect(x, y, radius, can.x, can.y, can.radius)) {
+        if (damageCanister(can, dmg)) {
+          this.detonateCanister(can, false);
+        } else {
+          this.spawnBurst(can.x, can.y, '#fb923c', 6, true);
+        }
+      }
+    }
+  }
+
+  private detonateCanister(can: ExplosiveCanister, isChain: boolean): void {
+    can.destroyed = true;
+    can.respawnTimer = 11.0;
+
+    soundEngine.playExplosion();
+    this.hitstopTimer = Math.max(this.hitstopTimer, 0.055);
+    this.trauma = Math.min(1, this.trauma + 0.52);
+    this.screenFlash('#fb923c', 0.24);
+    this.lighting.spawnFlash(can.x, can.y, '#fb923c', 185, 1.0, 0.3);
+    this.spawnBurst(can.x, can.y, '#ef4444', 28, true);
+    this.spawnBurst(can.x, can.y, '#fde047', 16, true);
+    this.spawnShockwave(can.x, can.y, 108, 0, '#fb923c', true, 320);
+    this.stampFloorDecal(can.x, can.y, '#1e293b', 16);
+    this.spawnFloatingText(can.x, can.y - 16, isChain ? 'CHAIN BOOM!' : 'BOOM!', '#fb923c', 1.2);
+    this.addStyle(isChain ? 160 : 120, isChain ? '+CHAIN BLAST' : '+CANISTER BOOM');
+
+    // Damage nearby shelves
+    this.damageShelvesInRadius(can.x, can.y, 92, 55);
+
+    // Massive blast damage & knockback to enemies!
+    for (const e of this.enemies) {
+      if (e.aiState === 'ko') continue;
+      const d = Math.hypot(e.x - can.x, e.y - can.y);
+      if (d <= 106 + e.radius) {
+        const ang = Math.atan2(e.y - can.y, e.x - can.x);
+        this.damageEnemy(e, Math.round(72 * this.player.damageMultiplier), ang, 360, true, true, false);
+      }
+    }
+
+    // Push nearby carts!
+    for (const c of this.carts) {
+      const d = Math.hypot(c.x - can.x, c.y - can.y);
+      if (d <= 105) {
+        const ang = Math.atan2(c.y - can.y, c.x - can.x);
+        c.vx += Math.cos(ang) * 420;
+        c.vy += Math.sin(ang) * 420;
+      }
+    }
+
+    // Queue chain detonation on nearby canisters!
+    for (const other of this.canisters) {
+      if (other.id === can.id || other.destroyed) continue;
+      if (Math.hypot(other.x - can.x, other.y - can.y) <= 125) {
+        if (!this.pendingChainCanisters.some((p) => p.id === other.id)) {
+          this.pendingChainCanisters.push({ id: other.id, timer: 0.13 });
+        }
       }
     }
   }
@@ -1003,12 +1192,21 @@ export class SupermarketBrawlerEngine {
       this.lighting.spawnFlash(cx, cy, col, 130, 0.95, 0.22);
       this.stampFloorDecal(cx, cy, col, 10);
       this.stampFloorDecal(cx + 12, cy - 6, '#94a3b8', 7);
-      this.addStyle(75, '+РАЗГРОМ ПОЛКИ');
-      this.spawnFloatingText(cx, cy - 10, 'ВДРЕБЕЗГИ!', col, 1.0);
+      this.addStyle(75, '+SHELF SMASH');
+      this.spawnFloatingText(cx, cy - 10, 'SMASHED!', col, 1.0);
 
-      // 35% chance to spill a bonus snack/bomb from smashed shelf!
-      if (Math.random() < 0.35 && this.pickups.length < 4) {
-        const dropPool: PickupKind[] = ['croissant', 'energy_drink', 'watermelon', 'soda_bomb'];
+      // Real-time shelf loot drops (60% drop chance, featuring 6-8s mini-buffs!)
+      if (Math.random() < 0.6 && this.pickups.length < 5) {
+        const dropPool: PickupKind[] = [
+          'buff_frenzy',
+          'buff_chili',
+          'buff_coin',
+          'buff_frenzy',
+          'buff_chili',
+          'croissant',
+          'soda_bomb',
+          'watermelon',
+        ];
         this.spawnPickupAt(dropPool[Math.floor(Math.random() * dropPool.length)], cx, cy);
       }
     }
@@ -1031,12 +1229,16 @@ export class SupermarketBrawlerEngine {
     p.dashCooldown = Math.max(0, p.dashCooldown - dt);
     p.shotgunCooldown = Math.max(0, p.shotgunCooldown - dt);
     p.parryCooldown = Math.max(0, p.parryCooldown - dt);
+    p.whiplashCooldown = Math.max(0, p.whiplashCooldown - dt);
+    p.frenzyTimer = Math.max(0, p.frenzyTimer - dt);
+    p.chiliTimer = Math.max(0, p.chiliTimer - dt);
     p.ghostHp = lerp(p.ghostHp, p.hp, Math.min(1, dt * 4.5));
     p.squashX = lerp(p.squashX, 1, Math.min(1, dt * 16));
     p.squashY = lerp(p.squashY, 1, Math.min(1, dt * 16));
 
+    const frenzyMult = p.frenzyTimer > 0 ? 1.55 : 1.0;
     const styleBonus = this.styleRank === 'ULTRA' || this.styleRank === 'SSS' ? 1.4 : 1.0;
-    p.stamina = Math.min(p.maxStamina, p.stamina + dt * 76 * styleBonus);
+    p.stamina = Math.min(p.maxStamina, p.stamina + dt * 76 * styleBonus * (p.frenzyTimer > 0 ? 1.35 : 1.0));
     p.railCharge = Math.min(100, p.railCharge + dt * (p.maxCoins > 4 ? 17 : 12.5) * styleBonus);
 
     if (p.coins < p.maxCoins) {
@@ -1096,7 +1298,13 @@ export class SupermarketBrawlerEngine {
       p.facingAngle = Math.atan2(iy, ix);
     }
 
-    // Dash (3+ charges, dash-cancels everything!)
+    // Whiplash Hook-Tape (ULTRAKILL style!)
+    if (this.whiplashQueued) {
+      this.whiplashQueued = false;
+      this.launchWhiplash(ix, iy);
+    }
+
+    // Dash
     if (p.dashBufferTimer > 0 && p.dashTimer <= 0 && p.dashCooldown <= 0 && p.stamina >= 100) {
       p.dashBufferTimer = 0;
       p.stamina -= 100;
@@ -1104,6 +1312,9 @@ export class SupermarketBrawlerEngine {
       p.dashCooldown = 0.1;
       p.invulnTimer = 0.25;
       p.attackPhase = 'idle';
+      if (this.whiplash.active && this.whiplash.phase === 'pull_player') {
+        this.whiplash.active = false;
+      }
       if (mag > 0.15) {
         p.dashDirX = ix;
         p.dashDirY = iy;
@@ -1114,10 +1325,12 @@ export class SupermarketBrawlerEngine {
       p.squashX = 1.35;
       p.squashY = 0.7;
       soundEngine.playDash();
-      this.spawnBurst(p.x, p.y, '#38bdf8', 12, true);
+      this.spawnBurst(p.x, p.y, p.chiliTimer > 0 ? '#fb923c' : '#38bdf8', 12, true);
+      if (p.chiliTimer > 0) {
+        this.spawnFloorHazard('chili_fire', p.x, p.y, 0, 0, 22, 0, 2.6, 12, true);
+      }
     }
 
-    // Dash-Slam: Attacking mid-dash triggers an explosive shockwave slam!
     if (p.attackBufferTimer > 0 && p.dashTimer > 0) {
       p.attackBufferTimer = 0;
       p.dashTimer = 0;
@@ -1164,17 +1377,31 @@ export class SupermarketBrawlerEngine {
       this.startPlayerAttack(ix, iy);
     }
 
-    if (p.dashTimer > 0) {
+    const onIce = isPointOnIce(p.x, p.y, this.currentZone);
+    const beltPush = getConveyorPushAt(p.x, p.y, this.currentZone);
+    const traction = onIce ? 3.8 : 25;
+
+    if (this.whiplash.active && this.whiplash.phase === 'pull_player') {
+      // Driven by updateWhiplash
+    } else if (p.dashTimer > 0) {
       p.dashTimer -= dt;
       const dashSpeed = p.speed * 2.9;
       p.vx = p.dashDirX * dashSpeed;
       p.vy = p.dashDirY * dashSpeed;
-      this.spawnAfterimage(p.x, p.y, p.facingAngle, '#38bdf8', true);
+      this.spawnAfterimage(p.x, p.y, p.facingAngle, p.chiliTimer > 0 ? '#fb923c' : '#38bdf8', true);
+      if (p.chiliTimer > 0) {
+        p.chiliTrailAccum += dt;
+        if (p.chiliTrailAccum >= 0.045) {
+          p.chiliTrailAccum = 0;
+          this.spawnFloorHazard('chili_fire', p.x, p.y, 0, 0, 20, 0, 2.4, 10, true);
+          this.spawnBurst(p.x, p.y, '#fb923c', 4, true);
+        }
+      }
     } else if (p.attackPhase !== 'idle') {
-      p.attackTimer -= dt;
+      p.attackTimer -= dt * frenzyMult;
       if (p.attackPhase === 'windup') {
-        p.vx = lerp(p.vx, ix * p.speed * 0.55, dt * 20);
-        p.vy = lerp(p.vy, iy * p.speed * 0.55, dt * 20);
+        p.vx = lerp(p.vx, ix * p.speed * 0.55, Math.min(1, dt * (onIce ? 4.5 : 20)));
+        p.vy = lerp(p.vy, iy * p.speed * 0.55, Math.min(1, dt * (onIce ? 4.5 : 20)));
         if (p.attackTimer <= 0) {
           p.attackPhase = 'active';
           p.attackTimer = 0.085;
@@ -1188,15 +1415,16 @@ export class SupermarketBrawlerEngine {
         }
       } else if (p.attackPhase === 'active') {
         this.checkPlayerMeleeHits();
-        p.vx *= Math.pow(0.05, dt);
-        p.vy *= Math.pow(0.05, dt);
+        const damp = onIce ? 0.55 : 0.05;
+        p.vx *= Math.pow(damp, dt);
+        p.vy *= Math.pow(damp, dt);
         if (p.attackTimer <= 0) {
           p.attackPhase = 'recovery';
           p.attackTimer = p.comboStep >= 3 ? 0.11 : 0.05;
         }
       } else if (p.attackPhase === 'recovery') {
-        p.vx = lerp(p.vx, ix * p.speed * 0.72, dt * 16);
-        p.vy = lerp(p.vy, iy * p.speed * 0.72, dt * 16);
+        p.vx = lerp(p.vx, ix * p.speed * 0.72, Math.min(1, dt * (onIce ? 4.5 : 16)));
+        p.vy = lerp(p.vy, iy * p.speed * 0.72, Math.min(1, dt * (onIce ? 4.5 : 16)));
         if (p.attackTimer <= 0) {
           p.attackPhase = 'idle';
           p.comboStep = (p.comboStep + 1) % 4;
@@ -1204,20 +1432,207 @@ export class SupermarketBrawlerEngine {
         }
       }
     } else {
-      p.vx = lerp(p.vx, ix * p.speed, Math.min(1, dt * 25));
-      p.vy = lerp(p.vy, iy * p.speed, Math.min(1, dt * 25));
+      const moveSpeed = p.speed * (p.frenzyTimer > 0 ? 1.15 : 1.0);
+      p.vx = lerp(p.vx, ix * moveSpeed, Math.min(1, dt * traction));
+      p.vy = lerp(p.vy, iy * moveSpeed, Math.min(1, dt * traction));
+    }
+
+    if (onIce && Math.hypot(p.vx, p.vy) > 95 && Math.random() < 0.3) {
+      this.spawnParticle(p.x, p.y + 6, 1, -p.vx * 0.15, -p.vy * 0.15, 22, 2, '#e0f2fe', 0.22, false);
     }
 
     const prevX = p.x;
     const prevY = p.y;
-    p.x += p.vx * dt;
-    p.y += p.vy * dt;
+    p.x += (p.vx + beltPush.vx) * dt;
+    p.y += (p.vy + beltPush.vy) * dt;
     const collidedShelf = this.resolveActorCollisions(p);
     if (collidedShelf && p.dashTimer > 0) {
-      // Dashing straight into a crate/rack smashes it!
       this.damageShelvesInRadius(p.x, p.y, p.radius + 8, 25);
     }
     p.walkDist += Math.hypot(p.x - prevX, p.y - prevY);
+  }
+
+  private launchWhiplash(ix: number, iy: number): void {
+    const p = this.player;
+    if (p.whiplashCooldown > 0 || this.whiplash.active) return;
+
+    if (!this.mouseMovedRecently) {
+      // Auto-aim toward nearest enemy, canister, or pickup
+      let bestDist = 370;
+      let bestAng: number | null = null;
+      for (const e of this.enemies) {
+        if (e.aiState === 'ko') continue;
+        const d = Math.hypot(e.x - p.x, e.y - p.y);
+        if (d < bestDist) {
+          bestDist = d;
+          bestAng = Math.atan2(e.y - p.y, e.x - p.x);
+        }
+      }
+      if (bestAng === null) {
+        for (const can of this.canisters) {
+          if (can.destroyed) continue;
+          const d = Math.hypot(can.x - p.x, can.y - p.y);
+          if (d < bestDist) {
+            bestDist = d;
+            bestAng = Math.atan2(can.y - p.y, can.x - p.x);
+          }
+        }
+      }
+      if (bestAng !== null) {
+        p.facingAngle = bestAng;
+      } else if (Math.hypot(ix, iy) > 0.15) {
+        p.facingAngle = Math.atan2(iy, ix);
+      }
+    }
+
+    p.whiplashCooldown = 1.6;
+    this.whiplash = {
+      active: true,
+      phase: 'extend',
+      x: p.x + Math.cos(p.facingAngle) * 14,
+      y: p.y + Math.sin(p.facingAngle) * 14,
+      vx: Math.cos(p.facingAngle) * 860,
+      vy: Math.sin(p.facingAngle) * 860,
+      targetEnemyId: null,
+      targetCanisterId: null,
+      targetPickupId: null,
+      timer: 0.42,
+    };
+    soundEngine.playWhiplash();
+    this.spawnBurst(this.whiplash.x, this.whiplash.y, '#ef4444', 7, true);
+  }
+
+  private updateWhiplash(dt: number): void {
+    const w = this.whiplash;
+    if (!w.active) return;
+    const p = this.player;
+
+    if (w.phase === 'extend') {
+      w.timer -= dt;
+      w.x += w.vx * dt;
+      w.y += w.vy * dt;
+
+      // Hit enemy?
+      for (const e of this.enemies) {
+        if (e.aiState === 'ko') continue;
+        if (circleIntersect(w.x, w.y, 12, e.x, e.y, e.radius + 4)) {
+          w.targetEnemyId = e.id;
+          const mode = computeWhiplashMode(e);
+          w.phase = mode;
+          w.timer = 0.45;
+          soundEngine.playHit(false, false);
+          this.spawnBurst(e.x, e.y, '#facc15', 14, true);
+          this.lighting.spawnFlash(e.x, e.y, '#ef4444', 110, 0.9, 0.18);
+          if (mode === 'pull_player') {
+            p.invulnTimer = Math.max(p.invulnTimer, 0.35);
+            this.addStyle(85, '+WHIPLASH GRAPPLE');
+            this.spawnFloatingText(p.x, p.y - 18, 'WHIPLASH!', '#facc15', 1.1);
+          } else {
+            e.aiState = 'stunned';
+            e.stateTimer = 0.42;
+            e.parryableWindow = false;
+            this.addStyle(95, '+WHIPLASH YANK');
+            this.spawnFloatingText(e.x, e.y - 18, 'YANKED!', '#38bdf8', 1.1);
+          }
+          return;
+        }
+      }
+
+      // Hit corner canister? Detonate immediately!
+      for (const can of this.canisters) {
+        if (can.destroyed) continue;
+        if (circleIntersect(w.x, w.y, 11, can.x, can.y, can.radius + 4)) {
+          this.detonateCanister(can, false);
+          w.phase = 'retract';
+          w.timer = 0.16;
+          return;
+        }
+      }
+
+      // Hit pickup? Yank pickup right to player!
+      for (const item of this.pickups) {
+        if (circleIntersect(w.x, w.y, 14, item.x, item.y, 12)) {
+          item.x = p.x;
+          item.y = p.y;
+          w.phase = 'retract';
+          w.timer = 0.12;
+          this.spawnFloatingText(p.x, p.y - 18, 'SNATCHED!', '#4ade80', 0.95);
+          return;
+        }
+      }
+
+      // Hit wall or shelf?
+      const hitBoundary =
+        w.x < WALL_THICKNESS ||
+        w.x > ARENA_WIDTH - WALL_THICKNESS ||
+        w.y < WALL_THICKNESS ||
+        w.y > ARENA_HEIGHT - WALL_THICKNESS;
+      let hitShelf = false;
+      for (const s of this.shelves) {
+        if (!s.destroyed && resolveCircleRect(w.x, w.y, 5, s).collided) {
+          this.applyShelfDamage(s, 18, w.x, w.y);
+          hitShelf = true;
+          break;
+        }
+      }
+
+      if (hitBoundary || hitShelf || w.timer <= 0 || Math.hypot(w.x - p.x, w.y - p.y) >= 360) {
+        w.phase = 'retract';
+        w.timer = 0.18;
+      }
+    } else if (w.phase === 'pull_player') {
+      const target = this.enemies.find((e) => e.id === w.targetEnemyId);
+      if (!target || target.aiState === 'ko') {
+        w.active = false;
+        return;
+      }
+      w.timer -= dt;
+      w.x = target.x;
+      w.y = target.y;
+      const dx = target.x - p.x;
+      const dy = target.y - p.y;
+      const dist = Math.hypot(dx, dy) || 1;
+      if (dist <= p.radius + target.radius + 18 || w.timer <= 0) {
+        p.vx = (dx / dist) * 160;
+        p.vy = (dy / dist) * 160;
+        w.active = false;
+        return;
+      }
+      const pullSpd = 760;
+      p.vx = (dx / dist) * pullSpd;
+      p.vy = (dy / dist) * pullSpd;
+      p.facingAngle = Math.atan2(dy, dx);
+      this.spawnAfterimage(p.x, p.y, p.facingAngle, '#ef4444', true);
+    } else if (w.phase === 'pull_enemy') {
+      const target = this.enemies.find((e) => e.id === w.targetEnemyId);
+      if (!target || target.aiState === 'ko') {
+        w.active = false;
+        return;
+      }
+      w.timer -= dt;
+      w.x = target.x;
+      w.y = target.y;
+      const dx = p.x - target.x;
+      const dy = p.y - target.y;
+      const dist = Math.hypot(dx, dy) || 1;
+      if (dist <= p.radius + target.radius + 18 || w.timer <= 0) {
+        target.vx = (dx / dist) * 120;
+        target.vy = (dy / dist) * 120;
+        w.active = false;
+        return;
+      }
+      const pullSpd = 680;
+      target.vx = (dx / dist) * pullSpd;
+      target.vy = (dy / dist) * pullSpd;
+      this.spawnAfterimage(target.x, target.y, target.facingAngle, '#facc15', false, target);
+    } else if (w.phase === 'retract') {
+      w.timer -= dt;
+      w.x = lerp(w.x, p.x, Math.min(1, dt * 24));
+      w.y = lerp(w.y, p.y, Math.min(1, dt * 24));
+      if (w.timer <= 0 || Math.hypot(w.x - p.x, w.y - p.y) < 16) {
+        w.active = false;
+      }
+    }
   }
 
   private executeDashSlam(): void {
@@ -1231,13 +1646,14 @@ export class SupermarketBrawlerEngine {
     soundEngine.playHit(true, true);
 
     this.damageShelvesInRadius(p.x, p.y, 76, 40);
+    this.damageCanistersInRadius(p.x, p.y, 76, 30);
 
     for (const e of this.enemies) {
       if (e.aiState === 'ko') continue;
       if (Math.hypot(e.x - p.x, e.y - p.y) <= 80 + e.radius) {
         const ang = Math.atan2(e.y - p.y, e.x - p.x);
         this.damageEnemy(e, Math.round(32 * p.damageMultiplier), ang, 280, true, true, false);
-        this.addStyle(110, '+СЛЭМ С РАЗБЕГА');
+        this.addStyle(110, '+DASH SLAM');
       }
     }
   }
@@ -1256,7 +1672,7 @@ export class SupermarketBrawlerEngine {
   private tossCoin(ix: number, iy: number): void {
     const p = this.player;
     if (p.coins <= 0) {
-      this.spawnFloatingText(p.x, p.y - 16, 'НЕТ МОНЕТ', '#94a3b8', 0.85);
+      this.spawnFloatingText(p.x, p.y - 16, 'NO COINS', '#94a3b8', 0.85);
       return;
     }
     this.aimAssistIfNeeded(ix, iy, 320);
@@ -1297,7 +1713,7 @@ export class SupermarketBrawlerEngine {
       if (!aimedCoin) this.aimAssistIfNeeded(ix, iy, 360);
     }
 
-    p.shotgunCooldown = 0.44;
+    p.shotgunCooldown = p.frenzyTimer > 0 ? 0.26 : 0.44;
     p.vx -= Math.cos(p.facingAngle) * 125;
     p.vy -= Math.sin(p.facingAngle) * 125;
     p.squashX = 0.78;
@@ -1306,7 +1722,7 @@ export class SupermarketBrawlerEngine {
     const count = p.shotgunPellets;
     const spread = 0.4;
     for (let i = 0; i < count; i++) {
-      const t = count === 1 ? 0 : (i / (count - 1)) - 0.5;
+      const t = count === 1 ? 0 : i / (count - 1) - 0.5;
       const ang = p.facingAngle + t * spread + (Math.random() - 0.5) * 0.05;
       const spd = 400 + Math.random() * 45;
       this.spawnProjectile(
@@ -1337,7 +1753,7 @@ export class SupermarketBrawlerEngine {
   private fireRailcannon(ix: number, iy: number): void {
     const p = this.player;
     if (p.railCharge < 100) {
-      this.spawnFloatingText(p.x, p.y - 18, `ЛУЧ ${Math.round(p.railCharge)}%`, '#38bdf8', 0.85);
+      this.spawnFloatingText(p.x, p.y - 18, `BEAM ${Math.round(p.railCharge)}%`, '#38bdf8', 0.85);
       return;
     }
 
@@ -1370,7 +1786,6 @@ export class SupermarketBrawlerEngine {
     this.screenFlash('#22d3ee', 0.25);
     this.lighting.spawnFlash(p.x + Math.cos(p.facingAngle) * 90, p.y + Math.sin(p.facingAngle) * 90, '#22d3ee', 210, 1.0, 0.28);
 
-    // Obliterate any shelves in the beam path!
     for (const s of this.shelves) {
       if (s.destroyed) continue;
       const sx = s.x + s.w / 2;
@@ -1380,7 +1795,14 @@ export class SupermarketBrawlerEngine {
       }
     }
 
-    // Hit airborne coins for ULTRA-RAIL-RICOCHET!
+    // Detonate canisters along the railbeam!
+    for (const can of this.canisters) {
+      if (can.destroyed) continue;
+      if (pointToSegmentDist(can.x, can.y, p.x, p.y, endX, endY) <= can.radius + 14) {
+        this.detonateCanister(can, false);
+      }
+    }
+
     let hitCoin = false;
     for (let ci = 0; ci < this.coins.length; ci++) {
       const c = this.coins[ci];
@@ -1392,13 +1814,12 @@ export class SupermarketBrawlerEngine {
       }
     }
 
-    // Piercing direct hit on opponent!
     for (const e of this.enemies) {
       if (e.aiState === 'ko') continue;
       if (pointToSegmentDist(e.x, e.y, p.x, p.y, endX, endY) <= e.radius + 14) {
         const dmg = Math.round((hitCoin ? 55 : 68) * p.damageMultiplier);
         this.damageEnemy(e, dmg, p.facingAngle, 320, true, true, false);
-        this.addStyle(hitCoin ? 220 : 145, hitCoin ? '+УЛЬТРА-РЕЛЬСОШЕТ' : '+СКАНЕР-РЕЛЬСА');
+        this.addStyle(hitCoin ? 220 : 145, hitCoin ? '+ULTRA RAILCOCHET' : '+SCANNER RAIL');
       }
     }
     this.tryEnemyReactiveDodge();
@@ -1410,7 +1831,6 @@ export class SupermarketBrawlerEngine {
     const reach = 46;
     const halfArc = Math.PI * 0.72;
 
-    // 1. Parry own fresh shotgun pellets -> PROJECTILE BOOST!
     for (const pr of this.projectiles) {
       if (!pr.active || !pr.fromPlayer || pr.kind !== 'pellet' || pr.age > 0.24) continue;
       if (Math.hypot(pr.x - p.x, pr.y - p.y) <= 48) {
@@ -1425,13 +1845,12 @@ export class SupermarketBrawlerEngine {
         this.trauma = Math.min(1, this.trauma + 0.42);
         this.screenFlash('#fb923c', 0.22);
         soundEngine.playParry();
-        this.addStyle(150, '+БУСТ СНАРЯДА');
-        this.spawnFloatingText(p.x, p.y - 20, 'БУСТ!', '#fb923c', 1.25);
+        this.addStyle(150, '+PROJECTILE BOOST');
+        this.spawnFloatingText(p.x, p.y - 20, 'BOOST!', '#fb923c', 1.25);
         return;
       }
     }
 
-    // 2. Parry enemy projectiles -> REFLECT!
     for (const pr of this.projectiles) {
       if (!pr.active || pr.fromPlayer) continue;
       if (Math.hypot(pr.x - p.x, pr.y - p.y) <= 46) {
@@ -1443,12 +1862,11 @@ export class SupermarketBrawlerEngine {
         const aimAng = opp ? Math.atan2(opp.y - pr.y, opp.x - pr.x) : p.facingAngle;
         pr.vx = Math.cos(aimAng) * 460;
         pr.vy = Math.sin(aimAng) * 460;
-        this.triggerParrySuccessReward('+ВОЗВРАТ СДАЧИ');
+        this.triggerParrySuccessReward('+RETURN TO SENDER');
         return;
       }
     }
 
-    // 3. Parry airborne coin -> FISTFUL OF RUBLES!
     for (let i = 0; i < this.coins.length; i++) {
       const c = this.coins[i];
       if (!c.active) continue;
@@ -1459,11 +1877,12 @@ export class SupermarketBrawlerEngine {
       }
     }
 
-    // 4. Parry Enemy Windup / Rush!
     for (const e of this.enemies) {
       if (e.aiState === 'ko') continue;
       if (
-        (e.parryableWindow || e.aiState === 'windup' || (e.aiState === 'attack' && e.currentMove === 'charge')) &&
+        (e.parryableWindow ||
+          e.aiState === 'windup' ||
+          (e.aiState === 'attack' && (e.currentMove === 'charge' || e.currentMove === 'forklift_ram'))) &&
         isInStrikeCone(p.x, p.y, p.facingAngle, e.x, e.y, e.radius, reach, halfArc)
       ) {
         p.parryHitDone = true;
@@ -1473,7 +1892,7 @@ export class SupermarketBrawlerEngine {
         const dmg = Math.round(48 * p.damageMultiplier);
         const ang = Math.atan2(e.y - p.y, e.x - p.x);
         this.damageEnemy(e, dmg, ang, 310, true, true, false);
-        this.triggerParrySuccessReward('+ПАРИРОВАНИЕ');
+        this.triggerParrySuccessReward('+PARRY');
         return;
       }
     }
@@ -1485,6 +1904,7 @@ export class SupermarketBrawlerEngine {
     p.hp = Math.min(p.maxHp, p.hp + 28);
     p.ghostHp = Math.max(p.ghostHp, p.hp);
     p.stamina = p.maxStamina;
+    p.whiplashCooldown = 0;
     p.railCharge = Math.min(100, p.railCharge + 35);
     this.hitstopTimer = 0.11;
     this.trauma = Math.min(1, this.trauma + 0.56);
@@ -1493,7 +1913,7 @@ export class SupermarketBrawlerEngine {
     soundEngine.playParry();
     this.addStyle(185, styleTag);
     this.spawnBurst(p.x, p.y, '#fde047', 26, true);
-    this.spawnFloatingText(p.x, p.y - 24, 'ПАРИР!', '#fde047', 1.38);
+    this.spawnFloatingText(p.x, p.y - 24, 'PARRY!', '#fde047', 1.38);
   }
 
   private startPlayerAttack(ix: number, iy: number): void {
@@ -1536,10 +1956,10 @@ export class SupermarketBrawlerEngine {
       }
     }
 
-    // Smash nearby shelves in front of melee swing!
     const strikeX = p.x + Math.cos(p.facingAngle) * (reach * 0.65);
     const strikeY = p.y + Math.sin(p.facingAngle) * (reach * 0.65);
     this.damageShelvesInRadius(strikeX, strikeY, 20, p.comboStep >= 3 ? 30 : 15);
+    this.damageCanistersInRadius(strikeX, strikeY, 24, 20);
 
     for (const c of this.carts) {
       if (isInStrikeCone(p.x, p.y, p.facingAngle, c.x, c.y, c.radius, reach + 4, halfArc)) {
@@ -1586,12 +2006,12 @@ export class SupermarketBrawlerEngine {
     soundEngine.playRicochet();
 
     const tag = railBoosted
-      ? '+УЛЬТРА-РЕЛЬСОШЕТ'
+      ? '+ULTRA RAILCOCHET'
       : res.coinIndices.length > 1
-        ? `+РИКОШЕТ x${res.coinIndices.length}`
+        ? `+RICOCHET x${res.coinIndices.length}`
         : punched
-          ? '+КУЛАК СДАЧИ'
-          : '+РИКОШЕТ МОНЕТОЙ';
+          ? '+FISTFUL OF CHANGE'
+          : '+RICOSHOT';
     this.addStyle(130 + (res.coinIndices.length - 1) * 90, tag);
   }
 
@@ -1614,7 +2034,7 @@ export class SupermarketBrawlerEngine {
     if (!e.enraged && e.hp > 0 && e.hp <= e.maxHp * 0.5) {
       e.enraged = true;
       e.speed = Math.round(e.speed * 1.18);
-      this.spawnFloatingText(e.x, e.y - 26, 'ЯРОСТЬ!', '#f43f5e', 1.3);
+      this.spawnFloatingText(e.x, e.y - 26, 'ENRAGED!', '#f43f5e', 1.3);
       this.spawnBurst(e.x, e.y, '#f43f5e', 24, true);
       this.spawnShockwave(e.x, e.y, 110, 0, '#f43f5e', true);
       this.screenFlash('#f43f5e', 0.16);
@@ -1634,7 +2054,7 @@ export class SupermarketBrawlerEngine {
     this.score += damage + this.comboCount * 8;
 
     if (allowStyleGain) {
-      this.addStyle(isCrit ? 52 : isHeavy ? 42 : 26, isHeavy ? '+РАЗНОС' : undefined);
+      this.addStyle(isCrit ? 52 : isHeavy ? 42 : 26, isHeavy ? '+HEAVY HIT' : undefined);
     }
 
     if (isCrit || isHeavy || e.hp <= 0) {
@@ -1671,13 +2091,14 @@ export class SupermarketBrawlerEngine {
       e.koTimer = 0.45;
       e.parryableWindow = false;
       this.kosTotal += 1;
+      this.player.whiplashCooldown = 0;
       this.score += (e.isBoss ? 500 : 250) + this.round * 50;
       soundEngine.playCashRegisterKO();
       this.screenFlash('#fde047', 0.3);
-      this.addStyle(280, '+НОКАУТ');
+      this.addStyle(280, '+KNOCKOUT');
       this.spawnBurst(e.x, e.y, '#fbbf24', 34, true);
       this.spawnShockwave(e.x, e.y, 130, 0, '#fde047', true);
-      this.spawnFloatingText(e.x, e.y - 24, 'НОКАУТ!', '#4ade80', 1.35);
+      this.spawnFloatingText(e.x, e.y - 24, 'K.O.!', '#4ade80', 1.35);
     }
   }
 
@@ -1686,7 +2107,7 @@ export class SupermarketBrawlerEngine {
     if (p.invulnTimer > 0 || p.hp <= 0 || this.pendingNextPhase) return;
 
     if (p.parryTimer > 0) {
-      this.triggerParrySuccessReward('+БЛОК-ПАРИР');
+      this.triggerParrySuccessReward('+GUARD PARRY');
       return;
     }
 
@@ -1759,6 +2180,105 @@ export class SupermarketBrawlerEngine {
     }
   }
 
+  private spawnFloorHazard(
+    kind: FloorHazard['kind'],
+    x: number,
+    y: number,
+    x2: number,
+    y2: number,
+    radius: number,
+    windup: number,
+    activeTimer: number,
+    damage: number,
+    fromPlayer: boolean
+  ): void {
+    for (const hz of this.hazards) {
+      if (!hz.active) {
+        hz.active = true;
+        hz.kind = kind;
+        hz.x = x;
+        hz.y = y;
+        hz.x2 = x2;
+        hz.y2 = y2;
+        hz.radius = radius;
+        hz.windupTimer = windup;
+        hz.maxWindup = Math.max(0.01, windup);
+        hz.activeTimer = activeTimer;
+        hz.damage = damage;
+        hz.fromPlayer = fromPlayer;
+        hz.hitTarget = false;
+        hz.tickAccum = 0;
+        return;
+      }
+    }
+  }
+
+  private updateHazards(dt: number): void {
+    const p = this.player;
+    for (const hz of this.hazards) {
+      if (!hz.active) continue;
+      if (hz.windupTimer > 0) {
+        hz.windupTimer -= dt;
+        if (hz.windupTimer <= 0) {
+          if (hz.kind === 'ice_spike') {
+            soundEngine.playIceSpike();
+            this.spawnBurst(hz.x, hz.y, '#67e8f9', 14, true);
+            this.lighting.spawnFlash(hz.x, hz.y, '#22d3ee', 85, 0.9, 0.18);
+          } else if (hz.kind === 'vip_laser') {
+            soundEngine.playRailcannon();
+            this.spawnLaser(hz.x, hz.y, hz.x2, hz.y2, '#e879f9', 7);
+            this.spawnLaser(hz.x, hz.y, hz.x2, hz.y2, '#ffffff', 2.5);
+            this.trauma = Math.min(1, this.trauma + 0.25);
+          }
+        }
+        continue;
+      }
+
+      hz.activeTimer -= dt;
+      if (hz.kind === 'ice_spike') {
+        if (!hz.hitTarget && Math.hypot(p.x - hz.x, p.y - hz.y) <= hz.radius + p.radius - 3) {
+          hz.hitTarget = true;
+          this.damagePlayer(hz.damage, Math.atan2(p.y - hz.y, p.x - hz.x));
+        }
+      } else if (hz.kind === 'vip_laser') {
+        if (!hz.hitTarget && pointToSegmentDist(p.x, p.y, hz.x, hz.y, hz.x2, hz.y2) <= p.radius + 7) {
+          hz.hitTarget = true;
+          this.damagePlayer(hz.damage, Math.atan2(hz.y2 - hz.y, hz.x2 - hz.x) + Math.PI / 2);
+        }
+      } else if (hz.kind === 'chili_fire') {
+        hz.tickAccum -= dt;
+        if (Math.random() < 0.28) {
+          this.spawnParticle(
+            hz.x + (Math.random() - 0.5) * hz.radius,
+            hz.y + (Math.random() - 0.5) * hz.radius,
+            2,
+            0,
+            -18,
+            35,
+            2,
+            Math.random() < 0.5 ? '#fb923c' : '#fde047',
+            0.22,
+            true
+          );
+        }
+        if (hz.tickAccum <= 0) {
+          hz.tickAccum = 0.28;
+          for (const e of this.enemies) {
+            if (e.aiState === 'ko') continue;
+            if (Math.hypot(e.x - hz.x, e.y - hz.y) <= hz.radius + e.radius) {
+              this.damageEnemy(e, Math.round(hz.damage * p.damageMultiplier), 0, 20, false, false, false);
+              this.addStyle(25, '+CHILI BURN');
+            }
+          }
+        }
+      }
+
+      if (hz.activeTimer <= 0) {
+        hz.active = false;
+      }
+    }
+  }
+
   private updateEnemies(dt: number): void {
     const p = this.player;
     for (let i = this.enemies.length - 1; i >= 0; i--) {
@@ -1785,13 +2305,16 @@ export class SupermarketBrawlerEngine {
         continue;
       }
 
+      const enemyOnIce = isPointOnIce(e.x, e.y, this.currentZone);
+      const enemyBelt = getConveyorPushAt(e.x, e.y, this.currentZone);
+
       if (e.aiState === 'stunned') {
         e.parryableWindow = false;
         e.stateTimer -= dt;
-        e.vx *= Math.pow(0.04, dt);
-        e.vy *= Math.pow(0.04, dt);
-        e.x += e.vx * dt;
-        e.y += e.vy * dt;
+        e.vx *= Math.pow(enemyOnIce ? 0.35 : 0.04, dt);
+        e.vy *= Math.pow(enemyOnIce ? 0.35 : 0.04, dt);
+        e.x += (e.vx + enemyBelt.vx) * dt;
+        e.y += (e.vy + enemyBelt.vy) * dt;
         this.resolveActorCollisions(e);
         if (e.stateTimer <= 0) {
           e.aiState = 'seek';
@@ -1823,10 +2346,10 @@ export class SupermarketBrawlerEngine {
           desiredVy = (dx / dist) * e.speed * 0.9 * e.strafeSign;
         }
 
-        e.vx = lerp(e.vx, desiredVx, Math.min(1, dt * 11));
-        e.vy = lerp(e.vy, desiredVy, Math.min(1, dt * 11));
+        const traction = enemyOnIce ? 3.2 : 11;
+        e.vx = lerp(e.vx, desiredVx, Math.min(1, dt * traction));
+        e.vy = lerp(e.vy, desiredVy, Math.min(1, dt * traction));
 
-        // Enemy tactical dash to reposition or dodge!
         if (e.dashCooldown <= 0 && dist > 110 && Math.random() < 0.04) {
           e.dashCooldown = e.enraged ? 1.15 : 1.9;
           const dashAng = toPlayerAngle + e.strafeSign * 0.55;
@@ -1843,9 +2366,9 @@ export class SupermarketBrawlerEngine {
         e.stateTimer -= dt;
         e.vx *= Math.pow(0.03, dt);
         e.vy *= Math.pow(0.03, dt);
-        if (e.currentMove !== 'charge' && e.currentMove !== 'laser') {
+        if (e.currentMove !== 'charge' && e.currentMove !== 'laser' && e.currentMove !== 'forklift_ram') {
           e.facingAngle = toPlayerAngle;
-        } else if (e.currentMove === 'charge') {
+        } else if (e.currentMove === 'charge' || e.currentMove === 'forklift_ram') {
           e.facingAngle = Math.atan2(e.chargeDirY, e.chargeDirX);
         }
 
@@ -1861,6 +2384,39 @@ export class SupermarketBrawlerEngine {
             e.vx = e.chargeDirX * (e.enraged ? 380 : 325);
             e.vy = e.chargeDirY * (e.enraged ? 380 : 325);
             soundEngine.playDash();
+          } else if (e.currentMove === 'forklift_ram') {
+            e.stateTimer = 0.62;
+            e.vx = e.chargeDirX * (e.enraged ? 430 : 375);
+            e.vy = e.chargeDirY * (e.enraged ? 430 : 375);
+            soundEngine.playDash();
+            this.spawnFloatingText(e.x, e.y - 20, 'FORKLIFT RAM!', '#f59e0b', 1.1);
+          } else if (e.currentMove === 'ice_spikes') {
+            e.stateTimer = 0.35;
+            const spikeCount = e.enraged ? 7 : 5;
+            for (let k = 0; k < spikeCount; k++) {
+              const ang = (k / spikeCount) * Math.PI * 2 + Math.random() * 0.4;
+              const rad = k === 0 ? 0 : 48 + Math.random() * 75;
+              const sx = clamp(p.x + Math.cos(ang) * rad, WALL_THICKNESS + 24, ARENA_WIDTH - WALL_THICKNESS - 24);
+              const sy = clamp(p.y + Math.sin(ang) * rad, WALL_THICKNESS + 24, ARENA_HEIGHT - WALL_THICKNESS - 24);
+              this.spawnFloorHazard('ice_spike', sx, sy, 0, 0, 30, 0.62, 0.35, e.damage, false);
+            }
+            this.spawnFloatingText(e.x, e.y - 22, 'CRYO SPIKES!', '#22d3ee', 1.15);
+            soundEngine.playIceSpike();
+          } else if (e.currentMove === 'vip_lasers') {
+            e.stateTimer = 0.4;
+            const beamCount = e.enraged ? 4 : 3;
+            for (let k = 0; k < beamCount; k++) {
+              const horizontal = k % 2 === 0;
+              if (horizontal) {
+                const ly = clamp(p.y + (k - 1) * 86 + (Math.random() - 0.5) * 30, WALL_THICKNESS + 24, ARENA_HEIGHT - WALL_THICKNESS - 24);
+                this.spawnFloorHazard('vip_laser', WALL_THICKNESS, ly, ARENA_WIDTH - WALL_THICKNESS, ly, 8, 0.72, 0.25, e.damage + 4, false);
+              } else {
+                const lx = clamp(p.x + (k - 1) * 110 + (Math.random() - 0.5) * 30, WALL_THICKNESS + 24, ARENA_WIDTH - WALL_THICKNESS - 24);
+                this.spawnFloorHazard('vip_laser', lx, WALL_THICKNESS, lx, ARENA_HEIGHT - WALL_THICKNESS, 8, 0.72, 0.25, e.damage + 4, false);
+              }
+            }
+            this.spawnFloatingText(e.x, e.y - 22, 'SECURITY SCAN!', '#e879f9', 1.15);
+            soundEngine.playTelegraph();
           } else if (e.currentMove === 'dash_flank') {
             e.stateTimer = 0.22;
             const flankAng = toPlayerAngle + e.strafeSign * 0.72;
@@ -1875,7 +2431,6 @@ export class SupermarketBrawlerEngine {
             this.spawnLaser(e.x, e.y, lx, ly, '#ffffff', 2.5);
             soundEngine.playRailcannon();
             this.trauma = Math.min(1, this.trauma + 0.34);
-            // Smash shelves in enemy laser path!
             for (const s of this.shelves) {
               if (s.destroyed) continue;
               const sx = s.x + s.w / 2;
@@ -1884,6 +2439,7 @@ export class SupermarketBrawlerEngine {
                 this.applyShelfDamage(s, 35, sx, sy);
               }
             }
+            this.damageCanistersInRadius(e.x, e.y, 40, 20);
             if (pointToSegmentDist(p.x, p.y, e.x, e.y, lx, ly) <= p.radius + 7) {
               this.damagePlayer(e.damage + 4, e.facingAngle);
             }
@@ -1918,7 +2474,6 @@ export class SupermarketBrawlerEngine {
             this.spawnShockwave(e.x, e.y, e.enraged ? 155 : 120, e.damage, '#ef4444', false, 240);
             if (e.enraged || e.isBoss) {
               this.spawnShockwave(e.x, e.y, 200, e.damage, '#fb7185', false, 175);
-              // Radial soda-can burst on Boss / Enraged slams!
               const ringCount = e.isBoss ? 10 : 6;
               for (let r = 0; r < ringCount; r++) {
                 const ang = (r / ringCount) * Math.PI * 2;
@@ -1934,6 +2489,7 @@ export class SupermarketBrawlerEngine {
               }
             }
             this.damageShelvesInRadius(e.x, e.y, 82, 40);
+            this.damageCanistersInRadius(e.x, e.y, 82, 25);
             soundEngine.playHit(true, false);
           } else {
             e.stateTimer = 0.14;
@@ -1946,8 +2502,15 @@ export class SupermarketBrawlerEngine {
         }
       } else if (e.aiState === 'attack') {
         e.stateTimer -= dt;
-        if (e.currentMove === 'charge') {
-          this.spawnAfterimage(e.x, e.y, e.facingAngle, '#ef4444', false, e);
+        if (e.currentMove === 'charge' || e.currentMove === 'forklift_ram') {
+          this.spawnAfterimage(
+            e.x,
+            e.y,
+            e.facingAngle,
+            e.currentMove === 'forklift_ram' ? '#f59e0b' : '#ef4444',
+            false,
+            e
+          );
           if (!e.didDealDamageThisSwing && circleIntersect(e.x, e.y, e.radius + 4, p.x, p.y, p.radius)) {
             e.didDealDamageThisSwing = true;
             this.damagePlayer(e.damage, Math.atan2(e.chargeDirY, e.chargeDirX));
@@ -1956,16 +2519,22 @@ export class SupermarketBrawlerEngine {
           const prevVy = e.vy;
           e.x += e.vx * dt;
           e.y += e.vy * dt;
+
+          if (e.currentMove === 'forklift_ram') {
+            // Warehouse Boss forklift bulldozes straight through shelves!
+            this.damageShelvesInRadius(e.x, e.y, e.radius + 14, 120);
+            this.damageCanistersInRadius(e.x, e.y, e.radius + 12, 30);
+          }
+
           const hitWall = this.resolveActorCollisions(e);
           if (hitWall) {
-            // Enemy charge smashes through shelves!
             this.damageShelvesInRadius(e.x, e.y, e.radius + 14, 45);
             if (Math.hypot(prevVx, prevVy) > 130) {
               e.aiState = 'stunned';
               e.stateTimer = 0.65;
               this.trauma = Math.min(1, this.trauma + 0.28);
               this.spawnBurst(e.x, e.y, '#facc15', 16, true);
-              this.spawnFloatingText(e.x, e.y - 16, 'ТАРАН!', '#facc15', 0.95);
+              this.spawnFloatingText(e.x, e.y - 16, 'CRASH!', '#facc15', 0.95);
               soundEngine.playHit(true, false);
               continue;
             }
@@ -1978,7 +2547,6 @@ export class SupermarketBrawlerEngine {
         } else if (e.currentMove === 'dash_flank') {
           this.spawnAfterimage(e.x, e.y, e.facingAngle, '#f43f5e', false, e);
           if (e.stateTimer <= 0) {
-            // Immediately chains into flurry or slam!
             e.currentMove = Math.random() < 0.6 ? 'flurry' : 'slam';
             e.moveComboLeft = 1;
             e.aiState = 'windup';
@@ -2047,8 +2615,8 @@ export class SupermarketBrawlerEngine {
 
       const prevX = e.x;
       const prevY = e.y;
-      e.x += e.vx * dt;
-      e.y += e.vy * dt;
+      e.x += (e.vx + enemyBelt.vx) * dt;
+      e.y += (e.vy + enemyBelt.vy) * dt;
       this.resolveActorCollisions(e);
       e.walkDist += Math.hypot(e.x - prevX, e.y - prevY);
     }
@@ -2076,22 +2644,31 @@ export class SupermarketBrawlerEngine {
     const roll = Math.random();
     let move: EnemyMoveKind = 'flurry';
 
-    if (dist > 150) {
-      if (roll < 0.34) move = 'charge';
-      else if (roll < 0.66) move = 'laser';
-      else if (roll < 0.86) move = 'barrage';
-      else move = 'dash_flank';
-    } else if (dist > 76) {
-      if (roll < 0.24) move = 'charge';
-      else if (roll < 0.48) move = 'dash_flank';
-      else if (roll < 0.68) move = 'barrage';
-      else if (roll < 0.85) move = 'laser';
-      else move = 'tornado';
-    } else {
-      if (roll < 0.36) move = 'flurry';
-      else if (roll < 0.66) move = 'slam';
-      else if (roll < 0.86) move = 'tornado';
-      else move = 'dash_flank';
+    // Signature Zone Boss moves!
+    if (e.isBoss && roll < 0.34) {
+      if (this.currentZone.id === 'frozen') move = 'ice_spikes';
+      else if (this.currentZone.id === 'warehouse') move = 'forklift_ram';
+      else if (this.currentZone.id === 'vip_night') move = 'vip_lasers';
+    }
+
+    if (move === 'flurry') {
+      if (dist > 150) {
+        if (roll < 0.34) move = 'charge';
+        else if (roll < 0.66) move = 'laser';
+        else if (roll < 0.86) move = 'barrage';
+        else move = 'dash_flank';
+      } else if (dist > 76) {
+        if (roll < 0.24) move = 'charge';
+        else if (roll < 0.48) move = 'dash_flank';
+        else if (roll < 0.68) move = 'barrage';
+        else if (roll < 0.85) move = 'laser';
+        else move = 'tornado';
+      } else {
+        if (roll < 0.36) move = 'flurry';
+        else if (roll < 0.66) move = 'slam';
+        else if (roll < 0.86) move = 'tornado';
+        else move = 'dash_flank';
+      }
     }
 
     e.currentMove = move;
@@ -2102,15 +2679,18 @@ export class SupermarketBrawlerEngine {
 
     const leadWeight = this.round >= 2 ? Math.min(0.85, 0.3 + this.round * 0.08) : 0;
 
-    if (move === 'charge') {
+    if (move === 'charge' || move === 'forklift_ram') {
       const ang = predictLeadAngle(e.x, e.y, p.x, p.y, p.vx, p.vy, 360, leadWeight * 0.65);
       e.chargeDirX = Math.cos(ang);
       e.chargeDirY = Math.sin(ang);
       e.stateTimer = e.enraged ? 0.37 : 0.47;
+    } else if (move === 'ice_spikes' || move === 'vip_lasers') {
+      e.stateTimer = e.enraged ? 0.38 : 0.48;
     } else if (move === 'laser') {
-      e.facingAngle = leadWeight > 0
-        ? predictLeadAngle(e.x, e.y, p.x, p.y, p.vx, p.vy, 520, leadWeight * 0.55)
-        : Math.atan2(dy, dx);
+      e.facingAngle =
+        leadWeight > 0
+          ? predictLeadAngle(e.x, e.y, p.x, p.y, p.vx, p.vy, 520, leadWeight * 0.55)
+          : Math.atan2(dy, dx);
       e.stateTimer = e.enraged ? 0.4 : 0.5;
     } else if (move === 'barrage' || move === 'tornado') {
       e.facingAngle = predictLeadAngle(e.x, e.y, p.x, p.y, p.vx, p.vy, 260, leadWeight);
@@ -2202,8 +2782,8 @@ export class SupermarketBrawlerEngine {
             this.damagePlayer(sw.damage, Math.atan2(p.y - sw.y, p.x - sw.x));
           } else if (p.dashTimer > 0) {
             sw.hitTarget = true;
-            this.addStyle(65, '+УКЛОНЕНИЕ');
-            this.spawnFloatingText(p.x, p.y - 18, 'ЧИСТО!', '#38bdf8', 0.9);
+            this.addStyle(65, '+DODGE');
+            this.spawnFloatingText(p.x, p.y - 18, 'CLEAN!', '#38bdf8', 0.9);
           }
         }
       }
@@ -2242,10 +2822,11 @@ export class SupermarketBrawlerEngine {
     const p = this.player;
     for (const c of this.carts) {
       c.hitFlash = Math.max(0, c.hitFlash - dt);
+      const belt = getConveyorPushAt(c.x, c.y, this.currentZone);
       const speed = Math.hypot(c.vx, c.vy);
-      if (speed > 2) {
-        c.x += c.vx * dt;
-        c.y += c.vy * dt;
+      if (speed > 2 || Math.hypot(belt.vx, belt.vy) > 0) {
+        c.x += (c.vx + belt.vx * 0.85) * dt;
+        c.y += (c.vy + belt.vy * 0.85) * dt;
         c.angle += (speed * dt) / 28;
         c.vx *= Math.pow(0.14, dt);
         c.vy *= Math.pow(0.14, dt);
@@ -2257,6 +2838,7 @@ export class SupermarketBrawlerEngine {
       const col = this.resolveActorCollisions(c);
       if (col && speed > 90) {
         this.damageShelvesInRadius(c.x, c.y, c.radius + 10, 28);
+        this.damageCanistersInRadius(c.x, c.y, c.radius + 10, 20);
         c.vx *= -0.55;
         c.vy *= -0.55;
         soundEngine.playHit(false, false);
@@ -2274,7 +2856,7 @@ export class SupermarketBrawlerEngine {
           if (circleIntersect(c.x, c.y, c.radius + 3, e.x, e.y, e.radius)) {
             const angle = Math.atan2(c.vy, c.vx);
             this.damageEnemy(e, 38, angle, 295, true, true, false);
-            this.addStyle(125, '+ВЗРЫВ ТЕЛЕЖКОЙ');
+            this.addStyle(125, '+CART CRASH');
             c.vx *= -0.45;
             c.vy *= -0.45;
           }
@@ -2295,6 +2877,9 @@ export class SupermarketBrawlerEngine {
       const item = this.pickups[i];
       item.bobPhase += dt * 5;
       item.ttl -= dt;
+      const belt = getConveyorPushAt(item.x, item.y, this.currentZone);
+      item.x = clamp(item.x + belt.vx * 0.55 * dt, WALL_THICKNESS + 14, ARENA_WIDTH - WALL_THICKNESS - 14);
+      item.y = clamp(item.y + belt.vy * 0.55 * dt, WALL_THICKNESS + 14, ARENA_HEIGHT - WALL_THICKNESS - 14);
       if (item.ttl <= 0) {
         this.pickups.splice(i, 1);
         continue;
@@ -2312,12 +2897,34 @@ export class SupermarketBrawlerEngine {
           p.coins = p.maxCoins;
           p.railCharge = 100;
           p.shotgunCooldown = 0;
-          this.spawnFloatingText(p.x, p.y - 18, 'УЛЬТРА ЗАРЯД!', '#38bdf8', 1.05);
+          this.spawnFloatingText(p.x, p.y - 18, 'ULTRA CHARGE!', '#38bdf8', 1.05);
           this.spawnBurst(item.x, item.y, '#38bdf8', 14, true);
+        } else if (item.kind === 'buff_frenzy') {
+          p.frenzyTimer = 7.5;
+          p.shotgunCooldown = 0;
+          this.spawnFloatingText(p.x, p.y - 18, 'FRENZY SPEED! 7.5s', '#22d3ee', 1.15);
+          this.spawnBurst(item.x, item.y, '#22d3ee', 16, true);
+          this.addStyle(65, '+ENERGY FRENZY');
+        } else if (item.kind === 'buff_chili') {
+          p.chiliTimer = 7.5;
+          p.stamina = p.maxStamina;
+          this.spawnFloatingText(p.x, p.y - 18, 'CHILI TRAIL! 7.5s', '#fb923c', 1.15);
+          this.spawnBurst(item.x, item.y, '#fb923c', 16, true);
+          this.addStyle(65, '+CHILI DASH');
+        } else if (item.kind === 'buff_coin') {
+          p.coins = Math.min(p.maxCoins + 2, p.coins + 2);
+          this.spawnFloatingText(p.x, p.y - 18, '+2 PROMO COINS!', '#fde047', 1.15);
+          this.spawnBurst(item.x, item.y, '#fde047', 16, true);
+          this.addStyle(70, '+PROMO COINS');
         } else {
           const opp = this.enemies[0];
           const ang = opp ? Math.atan2(opp.y - p.y, opp.x - p.x) : p.facingAngle;
-          const projKind = item.kind === 'watermelon' ? 'watermelon' : item.kind === 'soda_bomb' ? 'soda_bomb' : 'baguette';
+          const projKind =
+            item.kind === 'watermelon'
+              ? 'watermelon'
+              : item.kind === 'soda_bomb'
+                ? 'soda_bomb'
+                : 'baguette';
           this.spawnProjectile(
             p.x + Math.cos(ang) * 14,
             p.y + Math.sin(ang) * 14,
@@ -2327,8 +2934,8 @@ export class SupermarketBrawlerEngine {
             true,
             projKind
           );
-          this.spawnFloatingText(p.x, p.y - 18, 'СНАРЯД!', '#facc15', 1.0);
-          this.addStyle(50, '+СУПЕР-ТОВАР');
+          this.spawnFloatingText(p.x, p.y - 18, 'THROW!', '#facc15', 1.0);
+          this.addStyle(50, '+PRODUCE TOSS');
         }
         this.pickups.splice(i, 1);
       }
@@ -2337,7 +2944,16 @@ export class SupermarketBrawlerEngine {
 
   private spawnRandomPickup(): void {
     const spot = PICKUP_SPAWN_POINTS[Math.floor(Math.random() * PICKUP_SPAWN_POINTS.length)];
-    const kinds: PickupKind[] = ['watermelon', 'baguette', 'soda_bomb', 'energy_drink', 'croissant'];
+    const kinds: PickupKind[] = [
+      'watermelon',
+      'baguette',
+      'soda_bomb',
+      'energy_drink',
+      'croissant',
+      'buff_frenzy',
+      'buff_chili',
+      'buff_coin',
+    ];
     const kind = kinds[Math.floor(Math.random() * kinds.length)];
     this.spawnPickupAt(kind, spot.x + (Math.random() - 0.5) * 16, spot.y + (Math.random() - 0.5) * 16);
   }
@@ -2363,8 +2979,9 @@ export class SupermarketBrawlerEngine {
         pr.active = false;
         continue;
       }
-      pr.x += pr.vx * dt;
-      pr.y += pr.vy * dt;
+      const belt = getConveyorPushAt(pr.x, pr.y, this.currentZone);
+      pr.x += (pr.vx + belt.vx * 0.45) * dt;
+      pr.y += (pr.vy + belt.vy * 0.45) * dt;
       pr.spin += dt * 15;
 
       if (pr.fromPlayer && (pr.kind === 'pellet' || pr.kind === 'boost_pellet')) {
@@ -2382,6 +2999,21 @@ export class SupermarketBrawlerEngine {
           this.triggerCoinRicochet(hitCoinIdx, false);
           continue;
         }
+      }
+
+      // Check canister hits by any projectile!
+      let hitCanister = false;
+      for (const can of this.canisters) {
+        if (can.destroyed) continue;
+        if (circleIntersect(pr.x, pr.y, pr.radius + 2, can.x, can.y, can.radius)) {
+          this.detonateCanister(can, false);
+          hitCanister = true;
+          break;
+        }
+      }
+      if (hitCanister) {
+        this.detonateProjectile(pr);
+        continue;
       }
 
       let hitSolid =
@@ -2436,6 +3068,7 @@ export class SupermarketBrawlerEngine {
       this.stampFloorDecal(pr.x, pr.y, '#ef4444', 10);
       soundEngine.playHit(true, true);
       this.damageShelvesInRadius(pr.x, pr.y, 64, 30);
+      this.damageCanistersInRadius(pr.x, pr.y, 64, 20);
       for (const e of this.enemies) {
         if (e.aiState === 'ko') continue;
         if (Math.hypot(e.x - pr.x, e.y - pr.y) <= 68) {
@@ -2664,9 +3297,35 @@ export class SupermarketBrawlerEngine {
     wctx.imageSmoothingEnabled = false;
 
     wctx.drawImage(this.atlas.arenaBg, 0, 0);
+
+    // Animated conveyor belt chevrons in Warehouse!
+    if (this.currentZone.conveyors) {
+      wctx.save();
+      for (const belt of this.currentZone.conveyors) {
+        const dir = belt.vx >= 0 ? 1 : -1;
+        const offset = ((this.elapsedRealSec * Math.abs(belt.vx) * 0.65) % 24) * dir;
+        wctx.strokeStyle = 'rgba(251, 191, 36, 0.72)';
+        wctx.lineWidth = 2.5;
+        for (let x = belt.x + 12; x < belt.x + belt.w - 12; x += 24) {
+          let cx = x + offset;
+          if (cx < belt.x + 6) cx += belt.w - 12;
+          if (cx > belt.x + belt.w - 6) cx -= belt.w - 12;
+          const cy = belt.y + belt.h / 2;
+          wctx.beginPath();
+          wctx.moveTo(cx - dir * 5, cy - 6);
+          wctx.lineTo(cx + dir * 4, cy);
+          wctx.lineTo(cx - dir * 5, cy + 6);
+          wctx.stroke();
+        }
+      }
+      wctx.restore();
+    }
+
     wctx.drawImage(this.decalCanvas, 0, 0);
 
-    // Batch destroyed shelf outlines in one canvas state block
+    // Floor Hazards (Cryo Spikes, VIP Laser Scanners, Chili Fire Trail)
+    this.renderFloorHazards(wctx);
+
     let hasDestroyed = false;
     for (let i = 0; i < this.shelves.length; i++) {
       if (this.shelves[i].destroyed) {
@@ -2688,7 +3347,6 @@ export class SupermarketBrawlerEngine {
       wctx.restore();
     }
 
-    // Active destructible shelves
     for (let i = 0; i < this.shelves.length; i++) {
       const s = this.shelves[i];
       if (s.destroyed) continue;
@@ -2702,7 +3360,6 @@ export class SupermarketBrawlerEngine {
 
       const img = s.hitFlashTimer > 0 ? spr.flash : spr.normal;
       if (Math.abs(s.popScale - 1) < 0.02 && sx === 0 && sy === 0) {
-        // Fast path: direct drawImage without save/translate/scale/restore!
         wctx.drawImage(img, s.x - 2, s.y - 2);
       } else {
         wctx.save();
@@ -2712,7 +3369,6 @@ export class SupermarketBrawlerEngine {
         wctx.restore();
       }
 
-      // Crisp pixel damage cracks via fast fillRect (no path allocation!)
       if (s.hp < s.maxHp * 0.6) {
         wctx.fillStyle = '#0f172a';
         const cx = Math.round(s.x + s.w * 0.5);
@@ -2721,6 +3377,22 @@ export class SupermarketBrawlerEngine {
         wctx.fillRect(cx - 1, cy - 2, 4, 2);
         wctx.fillRect(cx + 3, cy, 4, 2);
       }
+    }
+
+    // Corner Explosive Canisters
+    for (const can of this.canisters) {
+      if (can.destroyed) {
+        wctx.strokeStyle = 'rgba(239, 68, 68, 0.28)';
+        wctx.lineWidth = 1;
+        wctx.beginPath();
+        wctx.arc(can.x, can.y, 7, 0, Math.PI * 2);
+        wctx.stroke();
+        continue;
+      }
+      wctx.fillStyle = 'rgba(15, 23, 42, 0.4)';
+      wctx.fillRect(Math.round(can.x - 6), Math.round(can.y + 6), 12, 4);
+      const cspr = can.hitFlashTimer > 0 ? this.atlas.canister.flash : this.atlas.canister.normal;
+      wctx.drawImage(cspr, Math.round(can.x - cspr.width / 2), Math.round(can.y - cspr.height / 2));
     }
 
     this.renderTelegraphs(wctx);
@@ -2757,7 +3429,6 @@ export class SupermarketBrawlerEngine {
       wctx.restore();
     }
 
-    // Dash Afterimages
     for (let i = 0; i < this.afterimages.length; i++) {
       const af = this.afterimages[i];
       if (!af.active) continue;
@@ -2773,7 +3444,6 @@ export class SupermarketBrawlerEngine {
     }
     wctx.globalAlpha = 1;
 
-    // Zero-allocation Y-sorted actor rendering (1v1!)
     const opp = this.enemies[0];
     if (this.phase === 'title') {
       if (opp) this.renderEnemy(wctx, opp);
@@ -2783,6 +3453,11 @@ export class SupermarketBrawlerEngine {
     } else {
       this.renderEnemy(wctx, opp);
       this.renderPlayer(wctx);
+    }
+
+    // Whiplash Receipt-Tape Hook!
+    if (this.whiplash.active) {
+      this.renderWhiplash(wctx);
     }
 
     for (const c of this.coins) {
@@ -2907,19 +3582,125 @@ export class SupermarketBrawlerEngine {
     dctx.restore();
   }
 
+  private renderFloorHazards(ctx: CanvasRenderingContext2D): void {
+    for (const hz of this.hazards) {
+      if (!hz.active) continue;
+      if (hz.kind === 'chili_fire') {
+        const alpha = Math.min(0.75, hz.activeTimer * 0.5);
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = 'rgba(249, 115, 22, 0.55)';
+        ctx.beginPath();
+        ctx.arc(hz.x, hz.y, hz.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(250, 204, 21, 0.7)';
+        ctx.beginPath();
+        ctx.arc(hz.x, hz.y, hz.radius * 0.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      } else if (hz.kind === 'ice_spike') {
+        ctx.save();
+        if (hz.windupTimer > 0) {
+          const prog = 1 - hz.windupTimer / hz.maxWindup;
+          ctx.fillStyle = 'rgba(34, 211, 238, 0.24)';
+          ctx.strokeStyle = '#67e8f9';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(hz.x, hz.y, hz.radius, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(hz.x, hz.y, hz.radius * prog, 0, Math.PI * 2);
+          ctx.stroke();
+        } else {
+          // Sharp crystal spike cluster!
+          ctx.fillStyle = '#0891b2';
+          ctx.beginPath();
+          ctx.arc(hz.x, hz.y, hz.radius * 0.9, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#cffafe';
+          for (let k = 0; k < 5; k++) {
+            const ang = (k / 5) * Math.PI * 2;
+            const px = hz.x + Math.cos(ang) * (hz.radius * 0.45);
+            const py = hz.y + Math.sin(ang) * (hz.radius * 0.45);
+            ctx.fillRect(Math.round(px - 3), Math.round(py - 7), 6, 14);
+          }
+        }
+        ctx.restore();
+      } else if (hz.kind === 'vip_laser') {
+        if (hz.windupTimer > 0) {
+          const pulse = 0.45 + 0.45 * Math.sin(this.elapsedRealSec * 28);
+          ctx.save();
+          ctx.strokeStyle = `rgba(232, 121, 249, ${pulse.toFixed(2)})`;
+          ctx.lineWidth = 2.5;
+          ctx.setLineDash([8, 6]);
+          ctx.beginPath();
+          ctx.moveTo(hz.x, hz.y);
+          ctx.lineTo(hz.x2, hz.y2);
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+    }
+  }
+
+  private renderWhiplash(ctx: CanvasRenderingContext2D): void {
+    const p = this.player;
+    const w = this.whiplash;
+    ctx.save();
+    // Receipt-tape cord with bold dark backing + dashed red/white stripes
+    ctx.strokeStyle = '#0f172a';
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(w.x, w.y);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#f8fafc';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(w.x, w.y);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#ef4444';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([6, 6]);
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(w.x, w.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Scanner-claw hook head
+    ctx.fillStyle = '#fde047';
+    ctx.strokeStyle = '#0f172a';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(w.x, w.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
   private renderTelegraphs(ctx: CanvasRenderingContext2D): void {
     for (const e of this.enemies) {
       if (e.aiState !== 'windup') continue;
       const pulse = 0.45 + 0.35 * Math.sin(this.elapsedRealSec * 30);
 
-      if (e.currentMove === 'charge') {
+      if (e.currentMove === 'charge' || e.currentMove === 'forklift_ram') {
         ctx.save();
-        ctx.strokeStyle = e.parryableWindow ? `rgba(253, 224, 71, ${pulse.toFixed(2)})` : `rgba(239, 68, 68, ${pulse.toFixed(2)})`;
-        ctx.lineWidth = 11;
+        const isRam = e.currentMove === 'forklift_ram';
+        ctx.strokeStyle = e.parryableWindow
+          ? `rgba(253, 224, 71, ${pulse.toFixed(2)})`
+          : isRam
+            ? `rgba(245, 158, 11, ${pulse.toFixed(2)})`
+            : `rgba(239, 68, 68, ${pulse.toFixed(2)})`;
+        ctx.lineWidth = isRam ? 15 : 11;
         ctx.setLineDash([8, 6]);
         ctx.beginPath();
         ctx.moveTo(e.x, e.y);
-        ctx.lineTo(e.x + e.chargeDirX * 165, e.y + e.chargeDirY * 165);
+        ctx.lineTo(e.x + e.chargeDirX * (isRam ? 210 : 165), e.y + e.chargeDirY * (isRam ? 210 : 165));
         ctx.stroke();
         ctx.restore();
       } else if (e.currentMove === 'laser') {
@@ -2932,10 +3713,11 @@ export class SupermarketBrawlerEngine {
         ctx.lineTo(e.x + Math.cos(e.facingAngle) * 420, e.y + Math.sin(e.facingAngle) * 420);
         ctx.stroke();
         ctx.restore();
-      } else if (e.currentMove === 'slam') {
+      } else if (e.currentMove === 'slam' || e.currentMove === 'ice_spikes' || e.currentMove === 'vip_lasers') {
         ctx.save();
-        ctx.fillStyle = `rgba(239, 68, 68, ${(pulse * 0.32).toFixed(2)})`;
-        ctx.strokeStyle = e.parryableWindow ? '#fde047' : `rgba(248, 113, 113, ${pulse.toFixed(2)})`;
+        const col = e.currentMove === 'ice_spikes' ? '34, 211, 238' : e.currentMove === 'vip_lasers' ? '232, 121, 249' : '239, 68, 68';
+        ctx.fillStyle = `rgba(${col}, ${(pulse * 0.32).toFixed(2)})`;
+        ctx.strokeStyle = e.parryableWindow ? '#fde047' : `rgba(${col}, ${pulse.toFixed(2)})`;
         ctx.lineWidth = 2.5;
         ctx.beginPath();
         ctx.arc(e.x, e.y, 72, 0, Math.PI * 2);
@@ -2956,7 +3738,9 @@ export class SupermarketBrawlerEngine {
         ctx.restore();
       } else {
         ctx.save();
-        ctx.fillStyle = e.parryableWindow ? `rgba(253, 224, 71, ${(pulse * 0.48).toFixed(2)})` : `rgba(239, 68, 68, ${(pulse * 0.36).toFixed(2)})`;
+        ctx.fillStyle = e.parryableWindow
+          ? `rgba(253, 224, 71, ${(pulse * 0.48).toFixed(2)})`
+          : `rgba(239, 68, 68, ${(pulse * 0.36).toFixed(2)})`;
         ctx.beginPath();
         ctx.moveTo(e.x, e.y);
         ctx.arc(e.x, e.y, 40, e.facingAngle - Math.PI * 0.48, e.facingAngle + Math.PI * 0.48);
@@ -2975,6 +3759,21 @@ export class SupermarketBrawlerEngine {
     ctx.beginPath();
     ctx.ellipse(p.x, p.y + 8, 9, 4.5, 0, 0, Math.PI * 2);
     ctx.fill();
+
+    if (p.frenzyTimer > 0) {
+      ctx.strokeStyle = 'rgba(34, 211, 238, 0.72)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.radius + 4, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    if (p.chiliTimer > 0) {
+      ctx.strokeStyle = 'rgba(251, 146, 60, 0.8)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.radius + 7, 0, Math.PI * 2);
+      ctx.stroke();
+    }
 
     if (p.invulnTimer > 0 && p.dashTimer <= 0 && Math.floor(this.elapsedRealSec * 24) % 2 === 0) {
       ctx.globalAlpha = 0.55;
@@ -3066,11 +3865,33 @@ export class SupermarketBrawlerEngine {
   private saveBestScore(): void {
     if (this.score > this.bestScore) {
       this.bestScore = this.score;
+      this.isNewRecord = true;
       try {
         localStorage.setItem(BEST_SCORE_KEY, String(this.bestScore));
       } catch {
         // Ignore storage error
       }
+    }
+  }
+
+  private recordRunOnGameOver(): void {
+    this.saveBestScore();
+    const record: RunRecord = {
+      id: `run-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      score: Math.round(this.score),
+      round: this.round,
+      styleRank: this.peakStyleRank,
+      zoneName: this.currentZone.name,
+      kos: this.kosTotal,
+      parries: this.parriesTotal,
+      elapsedSeconds: Math.round(this.runTimeSec),
+      timestamp: Date.now(),
+    };
+    this.leaderboard = sortRunLeaderboard([...this.leaderboard, record], 6);
+    try {
+      localStorage.setItem(LEADERBOARD_KEY, JSON.stringify(this.leaderboard));
+    } catch {
+      // Ignore storage error
     }
   }
 
@@ -3099,6 +3920,9 @@ export class SupermarketBrawlerEngine {
       railCharge: Math.round(p.railCharge),
       shotgunCooldownRatio: clamp(p.shotgunCooldown / 0.44, 0, 1),
       parryCooldownRatio: clamp(p.parryCooldown / 0.34, 0, 1),
+      whiplashCooldownRatio: clamp(p.whiplashCooldown / 1.6, 0, 1),
+      frenzySeconds: Number(p.frenzyTimer.toFixed(1)),
+      chiliSeconds: Number(p.chiliTimer.toFixed(1)),
       heldItem: p.heldItem,
       score: Math.round(this.score),
       bestScore: Math.round(this.bestScore),
@@ -3107,7 +3931,7 @@ export class SupermarketBrawlerEngine {
       stylePoints: Math.round(this.stylePoints),
       styleFeed: [...this.styleFeed],
       opponentName: opp ? opp.name : null,
-      opponentTitle: opp ? (opp.isBoss ? 'БОСС ДУЭЛИ' : `РАУНД ${this.round}`) : null,
+      opponentTitle: opp ? (opp.isBoss ? 'BOSS DUEL' : `ROUND ${this.round}`) : null,
       opponentHp: opp ? Math.round(opp.hp) : 0,
       opponentMaxHp: opp ? Math.round(opp.maxHp) : 0,
       opponentGhostHp: opp ? Math.round(opp.ghostHp) : 0,
@@ -3121,6 +3945,8 @@ export class SupermarketBrawlerEngine {
       announcement: this.announcementText,
       muted: soundEngine.isMuted(),
       isFullscreen: Boolean(typeof document !== 'undefined' && document.fullscreenElement),
+      leaderboard: this.leaderboard,
+      isNewRecord: this.isNewRecord,
     });
   }
 }

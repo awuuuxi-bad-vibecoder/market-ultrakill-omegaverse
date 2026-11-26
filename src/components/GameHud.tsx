@@ -22,6 +22,7 @@ export const GameHud: React.FC<GameHudProps> = ({
   const ghostPct = Math.max(hpPct, Math.min(100, (hud.ghostHp / Math.max(1, hud.maxHp)) * 100));
   const railPct = Math.max(0, Math.min(100, hud.railCharge));
   const railReady = railPct >= 100;
+  const hookReady = hud.whiplashCooldownRatio <= 0.01;
 
   const oppPct =
     hud.opponentMaxHp > 0
@@ -39,8 +40,8 @@ export const GameHud: React.FC<GameHudProps> = ({
       {/* Top Row: Player Vitality + 1v1 Duelist HP + Utility Controls */}
       <div className="flex flex-col gap-1 w-full">
         <div className="flex items-start justify-between gap-1 sm:gap-4 w-full">
-          {/* Top-Left: Player HP, 3-Charge Dash Pips, Railcannon Charge, Coins */}
-          <div className="flex flex-col gap-1 w-[106px] sm:w-[218px] shrink-0 bg-[#0f172a]/92 border-2 border-slate-700/90 rounded-lg px-1.5 py-1 sm:px-2.5 sm:py-2 [@media(max-height:500px)]:py-1 shadow-[0_3px_0_rgba(2,6,23,0.9)]">
+          {/* Top-Left: Player HP, 3-Charge Dash Pips, Railcannon Charge, Hook, Coins */}
+          <div className="flex flex-col gap-1 w-[112px] sm:w-[228px] shrink-0 bg-[#0f172a]/92 border-2 border-slate-700/90 rounded-lg px-1.5 py-1 sm:px-2.5 sm:py-2 [@media(max-height:500px)]:py-1 shadow-[0_3px_0_rgba(2,6,23,0.9)]">
             <div className="flex items-center justify-between gap-1">
               <div className="flex items-center gap-1">
                 <svg viewBox="0 0 24 24" className="w-3 h-3 sm:w-4 sm:h-4 shrink-0" aria-hidden="true">
@@ -91,18 +92,18 @@ export const GameHud: React.FC<GameHudProps> = ({
                 })}
               </div>
               <span className="font-mono-num text-[9px] sm:text-[11px] font-extrabold text-amber-300 whitespace-nowrap">
-                ₽{hud.coinCount}
+                ${hud.coinCount}
               </span>
             </div>
 
-            {/* Railcannon Charge Meter */}
-            <div className="flex items-center gap-1">
+            {/* Railcannon Charge & Whiplash Hook */}
+            <div className="flex items-center gap-1.5">
               <span
                 className={`text-[8px] sm:text-[10px] font-extrabold tracking-tight whitespace-nowrap ${
                   railReady ? 'text-cyan-300' : 'text-slate-400'
                 }`}
               >
-                {railReady ? 'ЛУЧ [C]' : 'ЛУЧ'}
+                {railReady ? 'BEAM [C]' : 'BEAM'}
               </span>
               <div className="relative h-1.5 flex-1 bg-slate-950 rounded-sm overflow-hidden border border-slate-800">
                 <div
@@ -112,16 +113,39 @@ export const GameHud: React.FC<GameHudProps> = ({
                   style={{ width: `${railPct}%` }}
                 />
               </div>
+              <span
+                className={`text-[8px] sm:text-[10px] font-extrabold tracking-tight whitespace-nowrap ${
+                  hookReady ? 'text-emerald-300' : 'text-slate-500'
+                }`}
+              >
+                HOOK [G]
+              </span>
             </div>
+
+            {/* Active Shelf Buff Timers */}
+            {(hud.frenzySeconds > 0 || hud.chiliSeconds > 0) && (
+              <div className="flex items-center gap-1 pt-0.5 flex-wrap">
+                {hud.frenzySeconds > 0 && (
+                  <span className="px-1.5 py-0.5 rounded bg-lime-400/20 border border-lime-400/70 text-[8px] sm:text-[10px] font-extrabold text-lime-300 font-mono-num leading-none">
+                    FRENZY {hud.frenzySeconds.toFixed(1)}s
+                  </span>
+                )}
+                {hud.chiliSeconds > 0 && (
+                  <span className="px-1.5 py-0.5 rounded bg-orange-500/20 border border-orange-400/70 text-[8px] sm:text-[10px] font-extrabold text-orange-300 font-mono-num leading-none">
+                    CHILI {hud.chiliSeconds.toFixed(1)}s
+                  </span>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Top-Center: 1v1 Opponent Duel Bar + Active Zone */}
           <div className="flex flex-col items-center text-center min-w-0 flex-1 max-w-[154px] sm:max-w-[300px] bg-[#0f172a]/92 border-2 border-slate-700/90 rounded-lg px-2 py-1 sm:px-3 sm:py-1.5 [@media(max-height:500px)]:py-1 shadow-[0_3px_0_rgba(2,6,23,0.9)]">
             <div className="flex items-center justify-center gap-1 sm:gap-2 text-[9px] sm:text-xs font-bold max-w-full whitespace-nowrap">
-              <span className="text-amber-300 shrink-0">Р{hud.round}</span>
+              <span className="text-amber-300 shrink-0">R{hud.round}</span>
               <span className="text-slate-500 shrink-0" aria-hidden="true">·</span>
               <span className={`truncate max-w-[74px] sm:max-w-none ${hud.opponentEnraged ? 'text-rose-400' : 'text-cyan-300'}`}>
-                {hud.opponentEnraged ? 'ЯРОСТЬ' : hud.zoneName}
+                {hud.opponentEnraged ? 'ENRAGED' : hud.zoneName}
               </span>
               <span className="sm:hidden text-slate-500 shrink-0" aria-hidden="true">·</span>
               <span className="sm:hidden font-mono-num text-amber-300 shrink-0">{hud.score}</span>
@@ -151,7 +175,7 @@ export const GameHud: React.FC<GameHudProps> = ({
           <div className="flex flex-col items-end gap-1 shrink-0">
             <div className="flex items-center gap-1 sm:gap-2">
               <div className="hidden sm:flex flex-col items-end bg-[#0f172a]/92 border-2 border-slate-700/90 rounded-lg px-3 py-1.5 [@media(max-height:500px)]:py-1 shadow-[0_3px_0_rgba(2,6,23,0.9)]">
-                <span className="text-[10px] font-bold text-slate-400 tracking-wider">СЧЁТ</span>
+                <span className="text-[10px] font-bold text-slate-400 tracking-wider">SCORE</span>
                 <span className="font-mono-num text-sm font-extrabold text-amber-300">{hud.score}</span>
               </div>
 
@@ -164,8 +188,8 @@ export const GameHud: React.FC<GameHudProps> = ({
                     onToggleMute();
                   }}
                   className="min-h-[32px] min-w-[32px] sm:min-h-[40px] sm:min-w-[40px] rounded-lg bg-[#0f172a]/92 border-2 border-slate-700 hover:border-amber-400 text-slate-200 flex items-center justify-center transition-colors cursor-pointer"
-                  aria-label={hud.muted ? 'Включить звук [M]' : 'Выключить звук [M]'}
-                  title="Звук [M]"
+                  aria-label={hud.muted ? 'Unmute [M]' : 'Mute [M]'}
+                  title="Audio [M]"
                 >
                   {hud.muted ? <VolumeX className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-rose-400" /> : <Volume2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-emerald-400" />}
                 </button>
@@ -177,8 +201,8 @@ export const GameHud: React.FC<GameHudProps> = ({
                     onToggleFullscreen();
                   }}
                   className="min-h-[32px] min-w-[32px] sm:min-h-[40px] sm:min-w-[40px] rounded-lg bg-[#0f172a]/92 border-2 border-slate-700 hover:border-amber-400 text-slate-200 flex items-center justify-center transition-colors cursor-pointer"
-                  aria-label={hud.isFullscreen ? 'Выйти из полного экрана' : 'Полный экран'}
-                  title="Полный экран"
+                  aria-label={hud.isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+                  title="Fullscreen"
                 >
                   {hud.isFullscreen ? (
                     <Minimize2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-cyan-300" />
@@ -194,8 +218,8 @@ export const GameHud: React.FC<GameHudProps> = ({
                     onTogglePause();
                   }}
                   className="min-h-[32px] min-w-[32px] sm:min-h-[40px] sm:min-w-[40px] rounded-lg bg-[#0f172a]/92 border-2 border-slate-700 hover:border-amber-400 text-slate-200 flex items-center justify-center transition-colors cursor-pointer"
-                  aria-label="Пауза [P]"
-                  title="Пауза [P]"
+                  aria-label="Pause [P]"
+                  title="Pause [P]"
                 >
                   <Pause className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                 </button>
@@ -207,8 +231,8 @@ export const GameHud: React.FC<GameHudProps> = ({
                     onRestart();
                   }}
                   className="min-h-[32px] min-w-[32px] sm:min-h-[40px] sm:min-w-[40px] rounded-lg bg-[#0f172a]/92 border-2 border-slate-700 hover:border-amber-400 text-slate-200 flex items-center justify-center transition-colors cursor-pointer"
-                  aria-label="Заново [R]"
-                  title="Заново [R]"
+                  aria-label="Restart [R]"
+                  title="Restart [R]"
                 >
                   <RotateCcw className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                 </button>
@@ -219,12 +243,12 @@ export const GameHud: React.FC<GameHudProps> = ({
             {(hud.stylePoints > 0 || hud.styleFeed.length > 0) && (
               <div className="bg-[#0f172a]/90 border-2 border-slate-700/90 rounded-lg px-2 py-1 sm:px-2.5 sm:py-1.5 text-right shadow-[0_3px_0_rgba(2,6,23,0.9)]">
                 <div className="flex items-baseline justify-end gap-1.5">
-                  <span className="text-[9px] sm:text-[10px] font-bold text-slate-400">СТИЛЬ</span>
+                  <span className="text-[9px] sm:text-[10px] font-bold text-slate-400">STYLE</span>
                   <span
                     className="font-pixel text-xs sm:text-base"
                     style={{ color: styleColor }}
                   >
-                    {hud.styleRank === 'ULTRA' ? 'УЛЬТРА!' : hud.styleRank}
+                    {hud.styleRank === 'ULTRA' ? 'ULTRA!' : hud.styleRank}
                   </span>
                 </div>
                 {hud.styleFeed.length > 0 && (
@@ -254,7 +278,7 @@ export const GameHud: React.FC<GameHudProps> = ({
         )}
         {hud.comboCount >= 2 && (
           <div className="mt-1.5 font-pixel text-xs sm:text-sm text-amber-300 hud-text-stroke">
-            КОМБО x{hud.comboCount}
+            COMBO x{hud.comboCount}
           </div>
         )}
       </div>
@@ -263,4 +287,3 @@ export const GameHud: React.FC<GameHudProps> = ({
     </div>
   );
 };
-

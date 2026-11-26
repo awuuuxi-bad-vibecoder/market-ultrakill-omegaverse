@@ -11,6 +11,7 @@ interface MobileControlsProps {
   railCharge: number;
   shotgunCooldownRatio: number;
   parryCooldownRatio: number;
+  whiplashCooldownRatio: number;
   layout: TouchLayoutConfig;
   onMove: (x: number, y: number) => void;
   onAttack: () => void;
@@ -19,18 +20,20 @@ interface MobileControlsProps {
   onShotgun: () => void;
   onCoin: () => void;
   onRailcannon: () => void;
+  onWhiplash: () => void;
 }
 
 export const BUTTON_BASE_POS: Record<
   Exclude<TouchControlId, 'stick'>,
   { xFromEdge: number; yFromBottom: number; size: number }
 > = {
-  attack: { xFromEdge: 0, yFromBottom: 0, size: 74 },
-  dash: { xFromEdge: 82, yFromBottom: 0, size: 58 },
-  parry: { xFromEdge: 140, yFromBottom: 56, size: 56 },
-  shotgun: { xFromEdge: 4, yFromBottom: 84, size: 56 },
-  coin: { xFromEdge: 72, yFromBottom: 96, size: 54 },
-  rail: { xFromEdge: 138, yFromBottom: 122, size: 52 },
+  attack: { xFromEdge: 0, yFromBottom: 0, size: 72 },
+  dash: { xFromEdge: 80, yFromBottom: 0, size: 56 },
+  parry: { xFromEdge: 144, yFromBottom: 24, size: 54 },
+  shotgun: { xFromEdge: 4, yFromBottom: 80, size: 54 },
+  coin: { xFromEdge: 68, yFromBottom: 70, size: 52 },
+  whiplash: { xFromEdge: 130, yFromBottom: 86, size: 52 },
+  rail: { xFromEdge: 68, yFromBottom: 132, size: 52 },
 };
 
 export const MobileControls: React.FC<MobileControlsProps> = ({
@@ -39,6 +42,7 @@ export const MobileControls: React.FC<MobileControlsProps> = ({
   railCharge,
   shotgunCooldownRatio,
   parryCooldownRatio,
+  whiplashCooldownRatio,
   layout,
   onMove,
   onAttack,
@@ -47,6 +51,7 @@ export const MobileControls: React.FC<MobileControlsProps> = ({
   onShotgun,
   onCoin,
   onRailcannon,
+  onWhiplash,
 }) => {
   const padRef = useRef<HTMLDivElement | null>(null);
   const activePointerId = useRef<number | null>(null);
@@ -114,7 +119,7 @@ export const MobileControls: React.FC<MobileControlsProps> = ({
         <div
           ref={padRef}
           role="group"
-          aria-label="Джойстик движения"
+          aria-label="Movement joystick"
           onPointerDown={(e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -156,9 +161,9 @@ export const MobileControls: React.FC<MobileControlsProps> = ({
         </div>
       </div>
 
-      {/* Action Thumb Zone: Bigger 6-Action Customizable Arc */}
+      {/* Action Thumb Zone: 7-Button Customizable Arc (including Whiplash Hook) */}
       <div
-        className="pointer-events-none relative w-[198px] h-[176px]"
+        className="pointer-events-none relative w-[218px] h-[194px]"
         style={{
           transform: `scale(${effectiveScale})`,
           transformOrigin: isLeftHanded ? 'bottom left' : 'bottom right',
@@ -178,7 +183,7 @@ export const MobileControls: React.FC<MobileControlsProps> = ({
               ? 'bg-cyan-300 text-slate-950 ring-2 ring-cyan-200/80'
               : 'bg-slate-800 text-cyan-200'
           }`}
-          aria-label="Рельсо-лазер"
+          aria-label="Railbeam laser"
         >
           {!railReady && (
             <div
@@ -186,10 +191,31 @@ export const MobileControls: React.FC<MobileControlsProps> = ({
               style={{ height: `${Math.round(railCharge)}%` }}
             />
           )}
-          <span className="text-[10px] font-extrabold leading-none relative z-10">ЛУЧ</span>
+          <span className="text-[10px] font-extrabold leading-none relative z-10">BEAM</span>
           <span className="font-mono-num text-[8px] font-bold leading-none mt-0.5 relative z-10">
             {railReady ? '100%' : `${Math.floor(railCharge)}%`}
           </span>
+        </button>
+
+        {/* Whiplash Grapple Hook */}
+        <button
+          type="button"
+          style={getBtnStyle('whiplash')}
+          onPointerDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onWhiplash();
+          }}
+          className="pointer-events-auto absolute rounded-full bg-emerald-400 border-2 border-slate-950 text-slate-950 flex flex-col items-center justify-center shadow-[0_3px_0_#0f172a] active:translate-y-0.5 transition-transform overflow-hidden cursor-pointer touch-none"
+          aria-label="Whiplash Hook"
+        >
+          {whiplashCooldownRatio > 0 && (
+            <div
+              className="absolute inset-x-0 bottom-0 bg-slate-950/55 pointer-events-none"
+              style={{ height: `${Math.round(whiplashCooldownRatio * 100)}%` }}
+            />
+          )}
+          <span className="text-[10px] font-extrabold leading-none relative z-10">HOOK</span>
         </button>
 
         {/* Coin Toss */}
@@ -204,10 +230,10 @@ export const MobileControls: React.FC<MobileControlsProps> = ({
           className={`pointer-events-auto absolute rounded-full border-2 border-slate-950 flex flex-col items-center justify-center shadow-[0_3px_0_#0f172a] active:translate-y-0.5 transition-transform cursor-pointer touch-none ${
             coinCount > 0 ? 'bg-amber-300 text-slate-950' : 'bg-slate-800 text-slate-400'
           }`}
-          aria-label="Бросить монету"
+          aria-label="Toss Promo Coin"
         >
-          <span className="font-mono-num text-xs font-extrabold leading-none">₽{coinCount}</span>
-          <span className="text-[7px] font-extrabold leading-none mt-0.5">МОНЕТА</span>
+          <span className="font-mono-num text-xs font-extrabold leading-none">${coinCount}</span>
+          <span className="text-[8px] font-extrabold leading-none mt-0.5">COIN</span>
         </button>
 
         {/* Price-Gun Shotgun */}
@@ -220,7 +246,7 @@ export const MobileControls: React.FC<MobileControlsProps> = ({
             onShotgun();
           }}
           className="pointer-events-auto absolute rounded-full bg-orange-500 border-2 border-slate-950 text-slate-950 flex flex-col items-center justify-center shadow-[0_4px_0_#0f172a] active:translate-y-0.5 transition-transform overflow-hidden cursor-pointer touch-none"
-          aria-label="Дробовик-сканер"
+          aria-label="Scanner Shotgun"
         >
           {shotgunCooldownRatio > 0 && (
             <div
@@ -228,7 +254,7 @@ export const MobileControls: React.FC<MobileControlsProps> = ({
               style={{ height: `${Math.round(shotgunCooldownRatio * 100)}%` }}
             />
           )}
-          <span className="text-[10px] font-extrabold leading-none relative z-10">ДРОБЬ</span>
+          <span className="text-[9px] font-extrabold leading-none relative z-10">SHOTGUN</span>
         </button>
 
         {/* Feedbacker Parry */}
@@ -241,7 +267,7 @@ export const MobileControls: React.FC<MobileControlsProps> = ({
             onParry();
           }}
           className="pointer-events-auto absolute rounded-full bg-yellow-400 border-2 border-slate-950 text-slate-950 flex flex-col items-center justify-center shadow-[0_4px_0_#0f172a] active:translate-y-0.5 transition-transform overflow-hidden cursor-pointer touch-none"
-          aria-label="Парирование"
+          aria-label="Parry"
         >
           {parryCooldownRatio > 0 && (
             <div
@@ -249,7 +275,7 @@ export const MobileControls: React.FC<MobileControlsProps> = ({
               style={{ height: `${Math.round(parryCooldownRatio * 100)}%` }}
             />
           )}
-          <span className="text-[10px] font-extrabold leading-none relative z-10">ПАРИР</span>
+          <span className="text-[10px] font-extrabold leading-none relative z-10">PARRY</span>
         </button>
 
         {/* 3-Charge Dash */}
@@ -264,12 +290,12 @@ export const MobileControls: React.FC<MobileControlsProps> = ({
           className={`pointer-events-auto absolute rounded-full border-2 border-slate-950 text-slate-950 flex flex-col items-center justify-center shadow-[0_4px_0_#0f172a] active:translate-y-0.5 transition-transform cursor-pointer touch-none ${
             dashCharges >= 1 ? 'bg-sky-400' : 'bg-slate-700 text-slate-300'
           }`}
-          aria-label="Рывок"
+          aria-label="Dash"
         >
           <span className="font-mono-num text-[11px] font-extrabold leading-none">
             x{Math.floor(dashCharges)}
           </span>
-          <span className="text-[9px] font-extrabold leading-none mt-0.5">РЫВОК</span>
+          <span className="text-[9px] font-extrabold leading-none mt-0.5">DASH</span>
         </button>
 
         {/* Primary Melee Combo */}
@@ -282,7 +308,7 @@ export const MobileControls: React.FC<MobileControlsProps> = ({
             onAttack();
           }}
           className="pointer-events-auto absolute rounded-full bg-rose-500 active:bg-rose-400 border-[3px] border-slate-950 text-white flex flex-col items-center justify-center shadow-[0_5px_0_#0f172a] active:translate-y-0.5 transition-transform cursor-pointer touch-none"
-          aria-label="Удар"
+          aria-label="Punch"
         >
           <svg viewBox="0 0 24 24" className="w-6 h-6" aria-hidden="true">
             <rect x="5" y="9" width="14" height="10" rx="2" fill="#fde047" stroke="#0f172a" strokeWidth="2" />
@@ -290,8 +316,8 @@ export const MobileControls: React.FC<MobileControlsProps> = ({
             <rect x="10.5" y="4" width="3" height="6" fill="#fef08a" stroke="#0f172a" strokeWidth="1.5" />
             <rect x="15" y="5" width="3" height="5" fill="#fef08a" stroke="#0f172a" strokeWidth="1.5" />
           </svg>
-          <span className="text-[11px] font-extrabold tracking-wide leading-none mt-0.5">
-            УДАР
+          <span className="text-[10px] font-extrabold tracking-wide leading-none mt-0.5">
+            PUNCH
           </span>
         </button>
       </div>

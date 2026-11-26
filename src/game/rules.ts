@@ -1,6 +1,7 @@
 import {
   ARENA_ZONES,
   BOSS_NAMES,
+  CANISTER_RESPAWN_DELAY,
   ENEMY_PALETTES,
   ROUND_TITLES,
   SHELF_RESPAWN_DELAY,
@@ -13,10 +14,12 @@ import {
   DestructibleShelf,
   EnemyArchetype,
   EnemyState,
+  ExplosiveCanister,
   PlayerState,
   Rect,
   RoundEnemySpec,
   RoundPlan,
+  RunRecord,
   ShelfObstacle,
   StyleRank,
   UpgradeOption,
@@ -38,6 +41,61 @@ export function normalizeAngle(angle: number): number {
 
 export function angleDiff(a: number, b: number): number {
   return normalizeAngle(b - a);
+}
+
+export function pointInRect(px: number, py: number, rect: Rect): boolean {
+  return px >= rect.x && px <= rect.x + rect.w && py >= rect.y && py <= rect.y + rect.h;
+}
+
+export function isPointOnIce(px: number, py: number, zone: ArenaZoneConfig): boolean {
+  if (!zone.icePatches || zone.icePatches.length === 0) return false;
+  for (const patch of zone.icePatches) {
+    if (pointInRect(px, py, patch)) return true;
+  }
+  return false;
+}
+
+export function getConveyorPushAt(px: number, py: number, zone: ArenaZoneConfig): { vx: number; vy: number } {
+  if (!zone.conveyors || zone.conveyors.length === 0) return { vx: 0, vy: 0 };
+  for (const belt of zone.conveyors) {
+    if (pointInRect(px, py, belt)) {
+      return { vx: belt.vx, vy: belt.vy };
+    }
+  }
+  return { vx: 0, vy: 0 };
+}
+
+export function computeWhiplashMode(
+  enemy: Pick<EnemyState, 'archetype' | 'isBoss'>
+): 'pull_player' | 'pull_enemy' {
+  if (enemy.isBoss || enemy.archetype === 'heavy' || enemy.archetype === 'charger') {
+    return 'pull_player';
+  }
+  return 'pull_enemy';
+}
+
+export function tickCanisterRespawn(canister: ExplosiveCanister, dt: number): boolean {
+  canister.hitFlashTimer = Math.max(0, canister.hitFlashTimer - dt);
+  if (!canister.destroyed) return false;
+  canister.respawnTimer -= dt;
+  if (canister.respawnTimer <= 0) {
+    canister.destroyed = false;
+    canister.hp = canister.maxHp;
+    canister.respawnTimer = 0;
+    canister.hitFlashTimer = 0.14;
+    return true;
+  }
+  return false;
+}
+
+export function sortRunLeaderboard(records: RunRecord[], maxEntries = 6): RunRecord[] {
+  return [...records]
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (b.round !== a.round) return b.round - a.round;
+      return b.timestamp - a.timestamp;
+    })
+    .slice(0, maxEntries);
 }
 
 export function resolveCircleRect(
@@ -152,7 +210,19 @@ export function damageShelf(shelf: DestructibleShelf, dmg: number): boolean {
     shelf.destroyed = true;
     shelf.respawnTimer = SHELF_RESPAWN_DELAY;
     shelf.popScale = 0.1;
-    return true; // Newly destroyed!
+    return true;
+  }
+  return false;
+}
+
+export function damageCanister(canister: ExplosiveCanister, dmg: number): boolean {
+  if (canister.destroyed) return false;
+  canister.hp = Math.max(0, canister.hp - dmg);
+  canister.hitFlashTimer = 0.1;
+  if (canister.hp <= 0) {
+    canister.destroyed = true;
+    canister.respawnTimer = CANISTER_RESPAWN_DELAY;
+    return true;
   }
   return false;
 }
@@ -171,7 +241,7 @@ export function tickShelfRespawn(shelf: DestructibleShelf, dt: number): boolean 
     shelf.respawnTimer = 0;
     shelf.popScale = 0.25;
     shelf.hitFlashTimer = 0.12;
-    return true; // Respawned!
+    return true;
   }
   return false;
 }
@@ -290,10 +360,20 @@ export function createEnemySpec(
   isBoss: boolean,
   seed: number
 ): RoundEnemySpec {
-  // Harder, longer, high-adrenaline 1v1 scaling + Zone Bosses every 5th round!
   const isZoneBoss = round % 5 === 0;
+  const zone = getZoneForRound(round);
+  const zoneIndex = ARENA_ZONES.findIndex((z) => z.id === zone.id);
   const roundScale = 1 + (round - 1) * 0.42;
   const speedScale = 1 + Math.min(0.88, (round - 1) * 0.095);
+
+  const zoneBossArchetypes: Record<string, EnemyArchetype> = {
+    grocery: 'brawler',
+    frozen: 'heavy',
+    warehouse: 'charger',
+    vip_night: 'flanker',
+  };
+
+  const finalArchetype = isZoneBoss ? (zoneBossArchetypes[zone.id] ?? archetype) : archetype;
 
   const baseByArchetype: Record<
     EnemyArchetype,
@@ -306,14 +386,18 @@ export function createEnemySpec(
     flanker: { hp: 345, speed: 176, damage: 15, radius: 11 },
   };
 
-  const base = baseByArchetype[archetype];
+  const base = baseByArchetype[finalArchetype];
   const bossMultHp = isZoneBoss ? 1.72 : isBoss ? 1.48 : 1.0;
   const bossMultDmg = isZoneBoss ? 1.24 : isBoss ? 1.15 : 1.0;
-  const namePool = SHOPPER_NAMES[archetype] ?? SHOPPER_NAMES.brawler;
+  const namePool = SHOPPER_NAMES[finalArchetype] ?? SHOPPER_NAMES.brawler;
+
+  const bossName = isZoneBoss
+    ? BOSS_NAMES[Math.max(0, zoneIndex) % BOSS_NAMES.length]
+    : pickFrom(BOSS_NAMES, seed);
 
   return {
-    archetype,
-    name: isBoss ? pickFrom(BOSS_NAMES, seed) : pickFrom(namePool, seed),
+    archetype: finalArchetype,
+    name: isBoss ? bossName : pickFrom(namePool, seed),
     isBoss,
     hp: Math.round(base.hp * roundScale * bossMultHp),
     speed: Math.round(base.speed * speedScale * (isZoneBoss ? 1.14 : isBoss ? 1.08 : 1.0)),
